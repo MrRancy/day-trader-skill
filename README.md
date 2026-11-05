@@ -61,6 +61,12 @@ a browser's headers and pauses between calls; no key, no login.
 | `/trader-analyst` | Results Analyst | Reads the quarterly Ind-AS XBRL a company filed with NSE and sums up what changed; finds the next results date. |
 | `/trader-insiders` | Insider Tracker | Reads SEBI insider-trading disclosures and NSE's bulk and block deals the evening they post. |
 
+And one conductor, `/trader-day`: it knows the clock and the state files,
+says where the day stands and what the next step is, and runs the
+mechanical steps (the morning scan and news, the 10:00 gate, the watch
+while a trade is open, the evening fetch, replay and journal) by calling
+the others. It never picks a chart, sets a stop or says yes.
+
 ## How to use it
 
 Everything lands in a `trader/` folder in your project, and each skill reads
@@ -170,6 +176,10 @@ trade, a 2R target, entries only between 10:00 and 11:00 and only when the
 10:00 breadth gate is open, the day over after one loss.
 
 ```bash
+python3 trader-day/day.py status                                       # where the day stands, the next step
+python3 trader-day/day.py morning                                      # 08:45: scan and news
+python3 trader-day/day.py gate                                         # 10:00: breadth, then the breakouts
+python3 trader-day/day.py evening --note "what went wrong"             # after 15:30: bars, replay, journal
 python3 trader-scanner/scan.py breadth                                 # 10:00: is the market broad enough?
 python3 trader-risk/check.py                                           # blocks entries while the gate is closed
 python3 trader-scanner/scan.py orb --now "2026-11-04 15:00" --save trader/replays/orb5m-2026-11-04.json.gz --no-trend
@@ -283,6 +293,7 @@ trader-broker/      SKILL.md, ticket.py
 trader-alerts/      SKILL.md, alerts.py, alerts.example.json
 trader-analyst/     SKILL.md, results.py, metrics.example.json
 trader-insiders/    SKILL.md, insiders.py
+trader-day/         SKILL.md, day.py (the conductor)
 tests/              unittest suite + offline fixtures
 upstream/           the original US-market skill, read-only, for reference
 ```

@@ -4,8 +4,13 @@ Port of github.com/Jakeschincariol/day-trader-skill (MIT, US market) to the
 Indian market (NSE/BSE). The original is cloned read-only at ./upstream/.
 Keep its structure: 11 skill folders, each a SKILL.md plus one stdlib-only
 Python script, sharing state through a trader/ folder (universe.txt ->
-watchlist.json -> plan.json -> orders.json). Keep its offline test suite
-pattern: tests/ with real-data fixtures that reproduce every README number.
+watchlist.json -> plan.json -> orders.json), plus one conductor folder,
+trader-day (added 2026-11-05: day.py reads the clock and the state files,
+names the next step, and runs the mechanical steps by calling the other
+scripts; it never decides a trade). Keep its offline test suite pattern:
+tests/ with real-data fixtures that reproduce every README number.
+The skills are installed as directory junctions under .claude/skills
+(gitignored), so the scripts resolve their folder with os.path.realpath.
 
 ## Decisions already made
 
