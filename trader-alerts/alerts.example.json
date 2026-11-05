@@ -1,0 +1,10 @@
+{
+  "rules": [
+    {"id": "opening-bell", "type": "opening_bell"},
+    {"id": "tataconsum-plan-stop", "symbol": "TATACONSUM", "type": "stop", "price": 1039.4, "note": "plan stop: opening-range midpoint", "date": "2026-11-03"},
+    {"id": "tataconsum-plan-target", "symbol": "TATACONSUM", "type": "target", "price": 1061.0, "note": "plan target: 1R (one times the risk)", "date": "2026-11-03"},
+    {"id": "tataconsum-flat-by", "symbol": "TATACONSUM", "type": "time", "at": "15:15", "label": "flat by close", "date": "2026-11-03"},
+    {"id": "reliance-move-3", "symbol": "RELIANCE", "type": "pct_move", "pct": 3},
+    {"id": "reliance-circuit", "symbol": "RELIANCE", "type": "circuit"}
+  ]
+}

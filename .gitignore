@@ -1,0 +1,10 @@
+.env
+__pycache__/
+*.pyc
+trader/*.json
+trader/universe.txt
+trader/state/
+.claude/launch.json
+trader/replays/
+trader/journal/
+upstream/

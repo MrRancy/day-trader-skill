@@ -1,0 +1,11 @@
+{
+  "source": "example weights for a five-stock split; not an index and not a recommendation",
+  "as_of": "2026-11-04",
+  "weights": [
+    {"symbol": "HDFCBANK", "name": "HDFC Bank", "weight": 30},
+    {"symbol": "ICICIBANK", "name": "ICICI Bank", "weight": 25},
+    {"symbol": "RELIANCE", "name": "Reliance Industries", "weight": 20},
+    {"symbol": "INFY", "name": "Infosys", "weight": 15},
+    {"symbol": "TCS", "name": "Tata Consultancy Services", "weight": 10}
+  ]
+}

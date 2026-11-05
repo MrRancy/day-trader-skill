@@ -1,0 +1,19 @@
+{
+ "status": "success",
+ "data": {
+  "NSE_2885": {
+   "live_price": 1311,
+   "day_change": 3.1,
+   "day_change_percentage": 0.24,
+   "day_low": 1296,
+   "day_high": 1318.9,
+   "day_open": 1301.9,
+   "prev_close": 1307.9,
+   "52week_high": 1611.8,
+   "52week_low": 1152.2,
+   "upper_circuit": 1356.3,
+   "lower_circuit": 1277.3,
+   "volume": 19451679
+  }
+ }
+}

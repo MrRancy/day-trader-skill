@@ -1,0 +1,18 @@
+{
+ "status": "success",
+ "data": {
+  "NSE_3432": {
+   "live_price": 1068.0,
+   "day_change": -5.0,
+   "day_change_percentage": -0.47,
+   "day_low": 1062.5,
+   "day_high": 1084.7,
+   "day_open": 1070.0,
+   "prev_close": 1073.0,
+   "upper_circuit": 1180.3,
+   "lower_circuit": 965.7,
+   "volume": 1663875
+  }
+ },
+ "note": "built from the Nov 4 2026 daily bar and the master's band; the shape of /market/quotes/full"
+}
