@@ -474,7 +474,8 @@ class Cli(unittest.TestCase):
         code, _, err = run(["orb", "--offline", ORB, "--now", "2026-11-03 10:00", "--config", cfg])
         self.assertEqual(code, 1)
         self.assertIn("expired", err)
-        code, _, err = run(["orb", "--offline", ORB, "--now", "2026-11-03 15:10", "--no-write"])
+        code, _, err = run(["orb", "--offline", ORB, "--now", "2026-11-03 15:10", "--no-write",
+                            "--config", os.path.join(self.t, "none.json")])   # not the real trader/config.json
         self.assertIn("after 15:00", err)                  # the default no_entries_after
         code, _, err = run(["orb", "--offline", ORB])
         self.assertIn("--at HH:MM", err)

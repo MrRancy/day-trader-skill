@@ -56,7 +56,7 @@ import os
 import re
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))  # realpath: works through a junction
 import trader_data  # noqa: E402
 
 # the fields INDstocks reads; the fingerprint (shared with trader-risk/check.py) covers these only

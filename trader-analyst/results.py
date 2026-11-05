@@ -59,7 +59,7 @@ import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))  # realpath: works through a junction
 import trader_data  # noqa: E402
 
 NSE_API = "https://www.nseindia.com/api/"

@@ -72,7 +72,7 @@ import re
 import statistics
 import sys
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))  # realpath: works through a junction
 import trader_data  # noqa: E402
 
 INTERVAL = 300       # 5-minute bars, in seconds

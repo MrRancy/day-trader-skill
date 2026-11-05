@@ -8,3 +8,4 @@ trader/state/
 trader/replays/
 trader/journal/
 upstream/
+.claude/skills/

@@ -56,7 +56,7 @@ import re
 import sys
 from decimal import Decimal, InvalidOperation, ROUND_FLOOR, ROUND_HALF_UP
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))  # realpath: works through a junction
 import trader_data  # noqa: E402
 
 INTERVALS = {"1m": 60, "5m": 300}
