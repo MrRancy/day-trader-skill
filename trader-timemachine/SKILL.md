@@ -104,7 +104,7 @@ entry, an entry off the 5-minute grid). A live in-progress bar is never used.
 
 ```bash
 python3 trader-scanner/scan.py orb --now "2026-11-04 15:00" --save trader/replays/orb5m-2026-11-04.json.gz --no-trend
-python3 "${CLAUDE_SKILL_DIR}/timemachine.py" universe trader/replays/orb5m-2026-11-04.json.gz --compare --write
+python3 "${CLAUDE_SKILL_DIR}/timemachine.py" universe trader/replays/orb5m-2026-11-04.json.gz --compare --others --write
 ```
 
 After the close, the scanner saves the day's 5-minute bars for the whole
@@ -119,6 +119,25 @@ time, the most traded breakout first on the same bar, the day over after a
 loss. `--compare` adds the baseline (1R, no gate, no cutoff, 3 trades).
 `--write` saves `trader/replays/DATE.json`, which trader-risk's journal
 picks up. `--min-score 5 --daily FILE` filters by the daily score card.
+
+`--strategy` swaps the entry rule, so a popular intraday strategy can be
+tested on the same days against the same costs before anyone believes a
+claimed win rate (the pages that list them give none, and the one backtest
+openalgo.in shows, EMA 9/21 on a NIFTY future, lost with a 28 % win rate):
+
+| strategy | entry | stop | target |
+| --- | --- | --- | --- |
+| `orb` | the first 5-minute close above the 15-minute opening range | the range midpoint | R x risk |
+| `vwap` | a close at least 0.4 % (`--vwap-pct`) under the session VWAP: "buy the dip" | the same distance under the entry | that bar's VWAP |
+| `ema` | EMA 9 crosses above EMA 21 on the day's 5-minute closes (both need 21 bars, so no cross before 11:00: use `--cutoff none`) | one ATR(14) under the entry | R x risk, or the crossunder |
+| `supertrend_rsi` | 5-minute Supertrend(10, 3) turns up with RSI(14) between 50 and 70 | the Supertrend line | R x risk |
+
+On the 174-chart Nov 3 fixture, gate off, all day: vwap 131 signals, 59
+target, 63 stop, net Rs -3,539.05; ema 106 signals, 31 target, 58 stop, 11
+exits on the crossunder, net Rs -2,707.61; supertrend_rsi 61 signals, 2
+target, 18 stop, 41 flat, net Rs -1,720.44. None beat ORB's Rs -2,868.30
+by enough to matter on a soft day; the whole-universe table for Nov 3 to 5
+is in `trader/replays/strategies-nov3-5.txt` (not in the tests).
 
 On the 174-chart Nov 3 fixture: the gate is closed at 62.6 %, so the rule
 takes nothing; the baseline took 90 breakouts, 34 target, 34 stop, 22 flat,

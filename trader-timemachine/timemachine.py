@@ -906,6 +906,119 @@ def u_shares_for_loss(max_loss, risk, fill, stop, rates):
     return q
 
 
+STRATEGIES = {
+    "orb": "the first 5-minute close above the 15-minute opening range; stop at the range midpoint; target R x risk",
+    "vwap": "a 5-minute close at least vwap_pct (0.4 %) under the session VWAP; target the VWAP of that bar; stop the "
+            "same distance under the entry (openalgo.in/python/intraday-strategies, buy-the-dip)",
+    "ema": "EMA 9 crosses above EMA 21 on 5-minute closes (both seeded from the day's own bars, so the first cross "
+           "cannot come before 11:00); stop one ATR(14) under the entry; target R x risk; exit on the crossunder",
+    "supertrend_rsi": "5-minute Supertrend(10, 3) turns up with RSI(14) between 50 and 70; stop at the Supertrend "
+                      "line; target R x risk",
+}
+
+
+def _target(entry, risk, r, tick):
+    return round(math.ceil(round((entry + r * risk) / tick, 6) - 1e-9) * tick, 2)
+
+
+def first_signal(strategy, bars, rule, tick, lo_min, hi_min, n_or):
+    """The first entry of `strategy` on one session's 75 bars whose trigger bar closes between lo_min and
+    hi_min (minutes after midnight). Returns {"k", "close_min", "entry", "stop", "target", "rule_exit"} or
+    None. The entry is the trigger bar's close; the caller fills at the next bar's open."""
+    closes = [b["c"] for b in bars]
+    highs, lows = [b["h"] for b in bars], [b["l"] for b in bars]
+    r = rule["target_r"]
+
+    def window(k):
+        m = OPEN_MIN + 5 * (k + 1)
+        return lo_min <= m <= hi_min, m
+
+    if strategy == "orb":
+        oh, ol = opening_range(bars, n_or)
+        for k in range(n_or, SESSION_BARS):
+            if closes[k] > oh:
+                ok, m = window(k)
+                if not ok:
+                    return None          # the first breakout is the only one; outside the window there is no trade
+                entry = round(closes[k], 2)
+                stop = tick_away((oh + ol) / 2, True, tick)
+                risk = round(entry - stop, 2)
+                if risk <= 0:
+                    return None
+                return {"k": k, "close_min": m, "entry": entry, "stop": stop, "target": _target(entry, risk, r, tick),
+                        "rule_exit": None}
+        return None
+
+    if strategy == "vwap":
+        pct = float(rule.get("vwap_pct", 0.4)) / 100.0
+        pv = vol = 0.0
+        for k in range(SESSION_BARS):
+            b = bars[k]
+            pv += (b["h"] + b["l"] + b["c"]) / 3 * b["v"]
+            vol += b["v"]
+            if not vol:
+                continue
+            vwap = pv / vol
+            ok, m = window(k)
+            if m < lo_min:
+                continue
+            if m > hi_min:
+                return None
+            if closes[k] <= vwap * (1 - pct):
+                entry = round(closes[k], 2)
+                gap = vwap - entry
+                stop = tick_away(entry - gap, True, tick)
+                target = tick_away(vwap, False, tick)          # up to the tick: the VWAP of the signal bar
+                if entry - stop <= 0 or target <= entry:
+                    return None
+                return {"k": k, "close_min": m, "entry": entry, "stop": stop, "target": target, "rule_exit": None}
+        return None
+
+    if strategy == "ema":
+        fast, slow = trader_data.ema(closes, 9), trader_data.ema(closes, 21)
+        atr = trader_data.atr_series(highs, lows, closes, 14)
+        for k in range(1, SESSION_BARS):
+            if None in (fast[k - 1], slow[k - 1], fast[k], slow[k]):
+                continue
+            if fast[k - 1] <= slow[k - 1] and fast[k] > slow[k]:
+                ok, m = window(k)
+                if m < lo_min:
+                    continue
+                if m > hi_min:
+                    return None
+                a = atr[k] if atr[k] is not None else (highs[k] - lows[k])
+                entry = round(closes[k], 2)
+                stop = tick_away(entry - a, True, tick)
+                risk = round(entry - stop, 2)
+                if risk <= 0:
+                    return None
+                exit_k = next((j for j in range(k + 1, SESSION_BARS)
+                               if fast[j] is not None and slow[j] is not None and fast[j] < slow[j]), None)
+                return {"k": k, "close_min": m, "entry": entry, "stop": stop, "target": _target(entry, risk, r, tick),
+                        "rule_exit": exit_k}
+        return None
+
+    if strategy == "supertrend_rsi":
+        line, direction = trader_data.supertrend(highs, lows, closes, 10, 3.0)
+        rsi = trader_data.rsi_series(closes, 14)
+        for k in range(1, SESSION_BARS):
+            if direction[k] == 1 and direction[k - 1] == -1 and rsi[k] is not None and 50 <= rsi[k] <= 70:
+                ok, m = window(k)
+                if m < lo_min:
+                    continue
+                if m > hi_min:
+                    return None
+                entry = round(closes[k], 2)
+                stop = tick_away(line[k], True, tick)
+                risk = round(entry - stop, 2)
+                if risk <= 0:
+                    return None
+                return {"k": k, "close_min": m, "entry": entry, "stop": stop, "target": _target(entry, risk, r, tick),
+                        "rule_exit": None}
+        return None
+    raise TMError("unknown strategy %r: one of %s" % (strategy, ", ".join(STRATEGIES)))
+
+
 def universe_replay(day, sessions, rule, rows=None, rates=None, scores=None):
     """One day, one rule, every chart. Returns the day's record.
 
@@ -924,48 +1037,44 @@ def universe_replay(day, sessions, rule, rows=None, rates=None, scores=None):
     gate_open = (not rule.get("gate_pct")) or (pct is not None and pct >= rule["gate_pct"])
     rec = {"date": day, "charts": len(sessions), "breadth_pct": round(pct, 1) if pct is not None else None,
            "breadth_counted": counted, "gate_open": gate_open, "rule": rule, "every": [], "ledger": [],
-           "budget": rule["budget"]}
+           "budget": rule["budget"], "strategy": rule.get("strategy", "orb")}
     if not gate_open:
         rec["cash_end"] = rule["budget"]
         return rec
-    # the breakouts, in trigger order; the most traded (rupees in the opening range) first on the same bar
+    # the signals, in trigger order; the most traded (rupees in the opening range) first on the same bar
+    strategy = rule.get("strategy", "orb")
+    lo_min = first_min if not gate_min else max(first_min, gate_min)
+    hi_min = cut_min or 15 * 60
     hits = []
     for sym, bars in sessions.items():
         if bars[0]["o"] < rule["min_price"]:
             continue
-        oh, ol = opening_range(bars, n_or)
-        kk = next((i for i in range(n_or, SESSION_BARS) if bars[i]["c"] > oh), None)
-        if kk is None:
-            continue
-        close_min = OPEN_MIN + 5 * (kk + 1)
-        if close_min < first_min or close_min > (cut_min or 15 * 60):
-            continue
-        if gate_min and close_min < gate_min:
+        tick = trader_data.tick_size(sym, bars[0]["c"], rows)[0]
+        sig = first_signal(strategy, bars, rule, tick, lo_min, hi_min, n_or)
+        if sig is None:
             continue
         if rule.get("min_score") is not None:
             sc = (scores or {}).get(sym)
             if sc is None or sc < rule["min_score"]:
                 continue
         traded = sum(b["c"] * b["v"] for b in bars[:n_or])
-        hits.append((close_min, -traded, sym, kk, oh, ol))
-    hits.sort()
+        hits.append((sig["close_min"], -traded, sym, sig))
+    hits.sort(key=lambda h: h[:3])
     cash, trades, lost, open_until = float(rule["budget"]), 0, False, -1
-    for close_min, _, sym, kk, oh, ol in hits:
+    for close_min, _, sym, sig in hits:
         bars = sessions[sym]
+        kk = sig["k"]
         if kk + 1 >= SESSION_BARS:
             continue
         fill_bar = bars[kk + 1]
         fill_close_min = OPEN_MIN + 5 * (kk + 2)
         if fill_close_min > U_FLAT_MIN:
             continue
-        tick = trader_data.tick_size(sym, bars[kk]["c"], rows)[0]
-        entry = round(bars[kk]["c"], 2)
-        stop = tick_away((oh + ol) / 2, True, tick)
+        entry, stop, target = sig["entry"], sig["stop"], sig["target"]
         fill = fill_bar["o"]
         risk = round(entry - stop, 2)
-        if risk <= 0 or fill - stop <= 0:
+        if risk <= 0 or fill - stop <= 0 or target <= fill:
             continue
-        target = round(math.ceil(round((entry + rule["target_r"] * risk) / tick, 6) - 1e-9) * tick, 2)
         ex = why = None
         for i in range(kk + 1, SESSION_BARS):
             b = bars[i]
@@ -975,6 +1084,9 @@ def universe_replay(day, sessions, rule, rows=None, rates=None, scores=None):
                 break
             if b["h"] >= target:
                 ex, why, when = target, "target", end_min
+                break
+            if sig.get("rule_exit") is not None and i >= sig["rule_exit"] and i > kk + 1:
+                ex, why, when = b["c"], "exit", end_min       # the strategy's own exit (an EMA crossunder)
                 break
             if end_min >= U_FLAT_MIN:
                 ex, why, when = b["c"], "flat", end_min
@@ -1008,9 +1120,12 @@ def universe_replay(day, sessions, rule, rows=None, rates=None, scores=None):
 
 def universe_summary(rec):
     ev = rec["every"]
-    return {"date": rec["date"], "charts": rec["charts"], "breadth_pct": rec["breadth_pct"], "gate_open": rec["gate_open"],
+    return {"date": rec["date"], "strategy": rec.get("strategy", "orb"), "charts": rec["charts"],
+            "breadth_pct": rec["breadth_pct"], "gate_open": rec["gate_open"],
             "breakouts": len(ev), "target": sum(1 for e in ev if e["why"] == "target"),
-            "stop": sum(1 for e in ev if e["why"] == "stop"), "flat": sum(1 for e in ev if e["why"] == "flat"),
+            "stop": sum(1 for e in ev if e["why"] == "stop"),
+            "flat": sum(1 for e in ev if e["why"] in ("flat", "exit")),
+            "rule_exit": sum(1 for e in ev if e["why"] == "exit"),
             "flat_green": sum(1 for e in ev if e["why"] == "flat" and e["R"] > 0),
             "avg_R": round(sum(e["R"] for e in ev) / len(ev), 3) if ev else None,
             "gross": round(sum(e["gross"] for e in ev), 2), "charges": round(sum(e["charges"] for e in ev), 2),
@@ -1025,17 +1140,18 @@ def rupees(x):
 def render_universe(rec, label):
     s = universe_summary(rec)
     r = rec["rule"]
-    out = ["%s, %s: %s charts with a full session; breadth at %s %s%% (gate %s): %s." % (
-        rec["date"], label, "{:,}".format(s["charts"]), r["gate_time"],
+    out = ["%s, %s%s: %s charts with a full session; breadth at %s %s%% (gate %s): %s." % (
+        rec["date"], ("%s, " % s["strategy"]) if s["strategy"] != "orb" else "", label, "{:,}".format(s["charts"]), r["gate_time"],
         s["breadth_pct"] if s["breadth_pct"] is not None else "n/a",
         ("%g%%" % r["gate_pct"]) if r.get("gate_pct") else "off",
         "OPEN" if s["gate_open"] else "CLOSED, no trades")]
     if not s["gate_open"]:
         return "\n".join(out) + "\n"
-    out.append("  every breakout at Rs %s each: %d taken, %d target, %d stop, %d flat at 15:15 (%d of those above the "
+    out.append("  every %s at Rs %s each: %d taken, %d target, %d stop, %d flat at 15:15%s (%d of those above the "
                "entry); average R %+.2f; gross %s, charges %s, net %s."
-               % ("{:,.0f}".format(rec["budget"]), s["breakouts"], s["target"], s["stop"], s["flat"], s["flat_green"],
-                  s["avg_R"] or 0.0, rupees(s["gross"]), "Rs {:,.2f}".format(s["charges"]), rupees(s["net"])))
+               % ("signal" if s["strategy"] != "orb" else "breakout", "{:,.0f}".format(rec["budget"]), s["breakouts"],
+                  s["target"], s["stop"], s["flat"], (" or on the rule's exit (%d)" % s["rule_exit"]) if s["rule_exit"] else "",
+                  s["flat_green"], s["avg_R"] or 0.0, rupees(s["gross"]), "Rs {:,.2f}".format(s["charges"]), rupees(s["net"])))
     out.append("  the ledger, Rs %s for the day, %d trade%s max, %s%% max loss a trade%s:" % (
         "{:,.0f}".format(rec["budget"]), r["max_trades"], "" if r["max_trades"] == 1 else "s", "%g" % r["max_loss_pct"],
         ", over after a loss" if r.get("stop_after_loss") else ""))
@@ -1077,6 +1193,9 @@ def cmd_universe(a):
         rule["stop_after_loss"] = False
     if a.min_score is not None:
         rule["min_score"] = int(a.min_score)
+    rule["strategy"] = a.strategy
+    if a.vwap_pct is not None:
+        rule["vwap_pct"] = float(a.vwap_pct)
     rows = None
     if a.master:
         rows = trader_data.parse_instruments(trader_data.read_text(a.master))
@@ -1097,13 +1216,20 @@ def cmd_universe(a):
     rec = universe_replay(day, sessions, rule, rows, trader_data.CHARGE_RATES, scores)
     base = None
     if a.compare:
-        brule = dict(rule, target_r=1.0, gate_pct=0.0, cutoff="", stop_after_loss=False, max_trades=3)
+        brule = dict(rule, target_r=1.0, gate_pct=0.0, cutoff="", stop_after_loss=False, max_trades=3, strategy="orb")
         brule.pop("min_score", None)
         base = universe_replay(day, sessions, brule, rows, trader_data.CHARGE_RATES, None)
+    others = []
+    if a.others:
+        for strat in sorted(STRATEGIES):
+            if strat == rule["strategy"]:
+                continue
+            orule = dict(rule, strategy=strat, cutoff="" if strat == "ema" else rule["cutoff"])
+            others.append(universe_summary(universe_replay(day, sessions, orule, rows, trader_data.CHARGE_RATES, scores)))
     doc = {"created_by": "trader-timemachine", "mode": "universe", "bundle": os.path.basename(a.bundle),
            "summary": universe_summary(rec), "rule": rule, "ledger": rec["ledger"],
            "every": rec["every"] if a.keep_every else None,
-           "baseline": universe_summary(base) if base else None,
+           "baseline": universe_summary(base) if base else None, "others": others or None,
            "note": "Every number is a count on this day's bars with fills at the trigger prices. Not a forecast."}
     if a.write:
         path = a.write if a.write is not True else os.path.join("trader", "replays", "%s.json" % day)
@@ -1117,6 +1243,11 @@ def cmd_universe(a):
     sys.stdout.write(render_universe(rec, label))
     if base:
         sys.stdout.write(render_universe(base, "baseline 1R, no gate, no cutoff, 3 trades"))
+    for o in others:
+        print("  %-15s %s" % (o["strategy"] + ":", "gate closed, none taken" if not o["gate_open"] else
+                              "%d signals, %d target, %d stop, %d flat, avg R %+.2f, net %s, ledger %s"
+                              % (o["breakouts"], o["target"], o["stop"], o["flat"], o["avg_R"] or 0.0,
+                                 rupees(o["net"]), rupees(o["ledger_net"]))))
     if a.write:
         print("Wrote %s." % path)
     print(doc["note"])
@@ -1161,6 +1292,9 @@ def main(argv=None):
     p.add_argument("bundle", help="a scanner bundle of 5-minute bars for the day")
     p.add_argument("--date", help="the day inside the bundle (default: the day with the most charts)")
     p.add_argument("--config", default="trader/config.json", help="budget, max_trades_per_day, breadth_gate_pct, gate_time")
+    p.add_argument("--strategy", default="orb", choices=sorted(STRATEGIES),
+                   help="the entry rule to replay (default orb); see STRATEGIES in this file")
+    p.add_argument("--vwap-pct", type=float, help="vwap: how far under VWAP a close must be, percent (default 0.4)")
     p.add_argument("--target", help="1R, 1.5R, 2R (default 2R)")
     p.add_argument("--gate", type=float, help="breadth gate percent at gate_time; 0 = no gate (default: config, 65)")
     p.add_argument("--cutoff", help="no entries after HH:MM (default 11:00; none = no cutoff)")
@@ -1171,6 +1305,7 @@ def main(argv=None):
     p.add_argument("--daily", help="a saved daily bundle, for --min-score")
     p.add_argument("--master", help="a saved instruments CSV for tick sizes (default: the price band)")
     p.add_argument("--compare", action="store_true", help="also show the baseline: 1R, no gate, no cutoff")
+    p.add_argument("--others", action="store_true", help="also score the other strategies with the same rule")
     p.add_argument("--keep-every", action="store_true", help="keep every breakout's row in the written file")
     p.add_argument("--write", nargs="?", const=True, metavar="PATH", help="save (default trader/replays/DATE.json)")
     p.add_argument("--json", action="store_true")

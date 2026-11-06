@@ -199,7 +199,7 @@ def next_step(s):
     if not s["bars_saved"]:
         return "Evening: save the day's bars and replay.", "day.py evening --note \"...\""
     if not s["replay"]:
-        return "Bars saved, replay missing.", "timemachine.py universe trader/replays/orb5m-%s.json.gz --compare --write" % s["today"]
+        return "Bars saved, replay missing.", "timemachine.py universe trader/replays/orb5m-%s.json.gz --compare --others --write" % s["today"]
     if not s["journal"]:
         return "Write the journal.", "check.py journal --note \"...\""
     return "The day is done. Friday: check.py review --days 7.", None
@@ -237,17 +237,42 @@ def run_step(label, args, dry_run, ok_codes=(0, 1)):
     return p.returncode
 
 
+def token_check():
+    """(ok, message): one INDstocks call. The token expired overnight on 2026-11-06 although it had been good at
+    20:46 the evening before, so the expiry is tied to the day, not to the 24 hours after generation."""
+    try:
+        me = trader_data.INDstocks().whoami()
+        return True, "token good (user %s)" % me.get("user_id", "?")
+    except trader_data.DataError as e:
+        return False, "token: %s" % str(e).splitlines()[0]
+
+
 def cmd_status(a, now, cfg):
     s = state(now, cfg)
+    if not a.now and not a.no_token:
+        ok, msg = token_check()
+        s["token"] = {"ok": ok, "message": msg}
     if a.json:
         s["next"] = dict(zip(("what", "command"), next_step(s)))
         print(json.dumps(s, indent=2))
     else:
-        sys.stdout.write(render_status(s))
+        text = render_status(s)
+        if s.get("token"):
+            text = text.replace("\nNext:", "\n  token     %s\nNext:" % s["token"]["message"], 1)
+            if not s["token"]["ok"]:
+                text += "The token is dead: regenerate it at indstocks.com (API trading, access tokens) and put it on " \
+                        "the INDSTOCKS_TOKEN line of .env before any step that reads the market.\n"
+        sys.stdout.write(text)
     return 0
 
 
 def cmd_morning(a, now, cfg):
+    if not a.dry_run:
+        ok, msg = token_check()
+        if not ok:
+            raise DayError("%s. Regenerate it at indstocks.com (API trading, access tokens), put it on the "
+                           "INDSTOCKS_TOKEN line of .env, then run day.py morning again." % msg)
+        print("== %s" % msg)
     stamp = ["--now", now.strftime("%Y-%m-%d %H:%M")] if a.now else []
     if not os.path.exists(FILES["universe"]) or a.universe:
         run_step("the universe (INDstocks master minus ASM/GSM)", [script("scanner"), "universe"], a.dry_run)
@@ -295,7 +320,7 @@ def cmd_evening(a, now, cfg):
                   "--out", "%s/watchlist-%s.json" % (FILES["replays"], today), "--show", "0"], a.dry_run)
     else:
         print("== bars already saved: %s" % bundle)
-    run_step("the evening replay", [script("timemachine"), "universe", bundle, "--compare", "--write"], a.dry_run)
+    run_step("the evening replay", [script("timemachine"), "universe", bundle, "--compare", "--others", "--write"], a.dry_run)
     notes = []
     for n in a.note or []:
         notes += ["--note", n]
@@ -313,6 +338,7 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd")
     p = sub.add_parser("status", parents=[common], help="where the day stands and the next step")
     p.add_argument("--json", action="store_true")
+    p.add_argument("--no-token", action="store_true", help="skip the INDstocks token check (live runs check it)")
     p = sub.add_parser("morning", parents=[common], help="the universe (if missing), the daily scan, news on the hits")
     p.add_argument("--universe", action="store_true", help="rebuild trader/universe.txt first")
     p.add_argument("--show", type=int, default=15)

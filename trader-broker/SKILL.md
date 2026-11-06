@@ -178,7 +178,7 @@ breadth gate, the day over after a loss). All times IST.
    11:00.
 6. **15:15** flat, whatever is open.
 7. **After 15:30** `scan.py orb --now "DATE 15:00" --save trader/replays/orb5m-DATE.json.gz --no-trend`,
-   then `timemachine.py universe trader/replays/orb5m-DATE.json.gz --compare --write`,
+   then `timemachine.py universe trader/replays/orb5m-DATE.json.gz --compare --others --write`,
    then `check.py journal --note "..."` with what went wrong and why.
 8. **Friday** `check.py review --days 7`. The month's question is one
    number: net rupees after charges, and whether the rule beat its baseline.

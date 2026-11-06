@@ -183,7 +183,7 @@ python3 trader-day/day.py evening --note "what went wrong"             # after 1
 python3 trader-scanner/scan.py breadth                                 # 10:00: is the market broad enough?
 python3 trader-risk/check.py                                           # blocks entries while the gate is closed
 python3 trader-scanner/scan.py orb --now "2026-11-04 15:00" --save trader/replays/orb5m-2026-11-04.json.gz --no-trend
-python3 trader-timemachine/timemachine.py universe trader/replays/orb5m-2026-11-04.json.gz --compare --write
+python3 trader-timemachine/timemachine.py universe trader/replays/orb5m-2026-11-04.json.gz --compare --others --write
 python3 trader-risk/check.py journal --note "what went wrong today"    # -> trader/journal/DATE.json
 python3 trader-risk/check.py review --days 7                           # the week in counts
 ```

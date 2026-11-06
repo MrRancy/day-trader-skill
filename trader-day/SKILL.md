@@ -40,7 +40,7 @@ python3 "${CLAUDE_SKILL_DIR}/day.py" morning --dry-run      # the commands a ste
 | phase (IST) | what the conductor does | what stays with the user and Claude |
 | --- | --- | --- |
 | before 08:45 | nothing | sleep |
-| 08:45 pre-market | `morning`: the universe if missing, `scan.py daily`, `news.py` on the hits | read the hits and the news, take nothing |
+| 08:45 pre-market | `morning`: the token check first, the universe if missing, `scan.py daily`, `news.py` on the hits | read the hits and the news, take nothing |
 | 09:15 to the gate | nothing, or `scan.py orb` to watch | watch the early breakouts, take nothing |
 | the gate (10:00) | `gate`: `scan.py breadth`; if open, `scan.py orb` | gate closed: a watching day. Open: pick ONE chart |
 | entry window to 11:00 | `status` names the next tool each time | `/trader-entry`, `/trader-exit` (2R), `/trader-timemachine`, `/trader-budget`, `/trader-risk`, then `/trader-broker` shows the ticket and waits for the yes |
@@ -73,6 +73,10 @@ saved bars, the replay and the journal, and names exactly one next step.
 - **Exit code 1 from a step is a finding, not a failure:** no setups, a
   closed gate, nothing new. The conductor says so and goes on. Any other
   non-zero code stops it with the message on screen.
+- **The token first.** A live `status` and every `morning` start with one
+  INDstocks call. The token expired overnight on 2026-11-06 although it had
+  been good at 20:46 the evening before: its life is tied to the day, not to
+  24 hours from generation, so regenerate it before 08:45, every day.
 
 ## Example: a watching day
 

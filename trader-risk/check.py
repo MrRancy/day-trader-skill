@@ -798,7 +798,7 @@ def journal_entry(today, files, notes=(), existing=None):
                    "charges": round(buys_chg + sum(f["charges"] or 0 for f in sells), 2)}
     j["trades"]["net"] = round(j["trades"]["gross"] - j["trades"]["charges"], 2)
     rp = files.get("replay")
-    j["replay"] = ({"rule": rp.get("summary"), "baseline": rp.get("baseline")} if rp else None)
+    j["replay"] = ({"rule": rp.get("summary"), "baseline": rp.get("baseline"), "others": rp.get("others")} if rp else None)
     old = list((existing or {}).get("notes") or [])
     for n in notes:
         old.append({"at": now_ist().strftime("%H:%M"), "note": n})
@@ -841,6 +841,10 @@ def render_journal(j):
             bl = rp["baseline"]
             out.append("            baseline 1R no gate: %s breakouts, avg R %s, net %s"
                        % (bl.get("breakouts"), bl.get("avg_R"), money(bl.get("net") or 0)))
+        for o in rp.get("others") or []:
+            out.append("            %s: %s" % (o.get("strategy"), "gate closed" if not o.get("gate_open") else
+                                              "%s signals, avg R %s, net %s" % (o.get("breakouts"), o.get("avg_R"),
+                                                                                 money(o.get("net") or 0))))
     else:
         out.append("  replay    none (timemachine.py universe --write after the close)")
     for n in j.get("notes") or []:

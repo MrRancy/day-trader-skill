@@ -108,9 +108,38 @@ class UniverseReplay(unittest.TestCase):
         self.assertEqual((s["breakouts"], s["target"], s["stop"], s["flat"], s["avg_R"], s["net"]), (75, 13, 33, 29, 0.109, -1542.54))
         self.assertEqual(s["ledger_net"], 60.32)               # HDFCBANK alone: flat at 724.70 against a 2R target
 
+    def test_the_other_strategies_on_174_charts(self):
+        day, sessions = tm.load_universe(ORB)
+        rows = tm.trader_data.parse_instruments(tm.trader_data.read_text(MASTER))
+        base = dict(tm.U_DEFAULTS, gate_pct=0.0, cutoff="", stop_after_loss=True)
+        got = {}
+        for strat in ("vwap", "ema", "supertrend_rsi"):
+            s = tm.universe_summary(tm.universe_replay(day, sessions, dict(base, strategy=strat), rows))
+            got[strat] = (s["breakouts"], s["target"], s["stop"], s["flat"], s["rule_exit"], s["avg_R"], s["net"])
+        self.assertEqual(got["vwap"], (131, 59, 63, 9, 0, -0.024, -3539.05))
+        self.assertEqual(got["ema"], (106, 31, 58, 17, 11, 0.027, -2707.61))
+        self.assertEqual(got["supertrend_rsi"], (61, 2, 18, 41, 0, -0.049, -1720.44))
+        # the definitions, on one made-up session
+        flat = [{"o": 100.0, "h": 100.5, "l": 99.5, "c": 100.0, "v": 1000}] * 75
+        self.assertIsNone(tm.first_signal("vwap", flat, base, 0.05, 9 * 60 + 35, 15 * 60, 3))
+        dip = [dict(b) for b in flat]
+        dip[20] = {"o": 100.0, "h": 100.0, "l": 99.0, "c": 99.2, "v": 1000}        # 0.8 % under the VWAP
+        sig = tm.first_signal("vwap", dip, base, 0.05, 9 * 60 + 35, 15 * 60, 3)
+        self.assertEqual((sig["k"], sig["close_min"]), (20, 9 * 60 + 15 + 105))
+        self.assertEqual(sig["entry"], 99.2)
+        self.assertAlmostEqual(sig["target"], 100.0, places=1)                    # the VWAP, on the tick
+        self.assertAlmostEqual(sig["stop"], 99.2 - (sig["target"] - 99.2), places=1)
+        with self.assertRaises(tm.TMError):
+            tm.first_signal("martingale", flat, base, 0.05, 0, 900, 3)
+
     def test_cli(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = os.path.join(tmp, "replay.json")
+            code, out, err = run(tm, ["universe", ORB, "--strategy", "vwap", "--gate", "0", "--cutoff", "none",
+                                      "--config", "/nonexistent", "--master", MASTER])
+            self.assertEqual(code, 0, err)
+            self.assertIn("2026-11-03, vwap, 2R, gate off, cutoff none: 174 charts", out)
+            self.assertIn("every signal at Rs 10,000 each: 131 taken, 59 target, 63 stop, 9 flat at 15:15", out)
             code, out, err = run(tm, ["universe", ORB, "--config", "/nonexistent", "--compare", "--master", MASTER,
                                       "--write", path])
             self.assertEqual(code, 0, err)

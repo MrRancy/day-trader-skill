@@ -46,6 +46,7 @@ TOKEN_VAR = "INDSTOCKS_TOKEN"
 BACKEND_VAR = "TRADER_DATA_BACKEND"
 PAUSE = 0.25        # seconds between requests: data and quote APIs allow 5 a second
 BACKOFF = 5.0       # seconds before the one retry after a 429
+THROTTLE_BACKOFF = 20.0   # seconds before retrying a 403 (20 s, then 40 s): a burst trips INDstocks' limit as a 403
 SLEEP = time.sleep  # tests swap this out
 
 # our short names -> INDstocks path values, and the widest window one call may ask for
@@ -595,10 +596,19 @@ class INDstocks(object):
                     body = ""
                 finally:
                     e.close()
+                if e.code == 403 and attempt < 2:
+                    # INDstocks answers 403 with the "token expired" text when a burst trips its rate limit
+                    # (seen 2026-11-06 after about 900 requests in five minutes, with a token that whoami
+                    # confirmed): back off before believing it.
+                    last = "HTTP 403 (a throttle after a burst, or the token)"
+                    SLEEP(THROTTLE_BACKOFF * (attempt + 1))
+                    continue
                 if e.code in (401, 403):
                     raise DataError("INDstocks answered HTTP %d for %s: the token is invalid or has expired "
-                                    "(tokens last 24 hours). Generate a new one and set %s."
-                                    % (e.code, path, TOKEN_VAR))
+                                    "(it dies with the day, not 24 hours after generation)%s. Generate a new one "
+                                    "and set %s." % (e.code, path,
+                                                     ", or a burst of requests tripped its rate limit" if e.code == 403 else "",
+                                                     TOKEN_VAR))
                 if e.code == 429 and attempt == 0:
                     last = "HTTP 429"
                     SLEEP(BACKOFF)
