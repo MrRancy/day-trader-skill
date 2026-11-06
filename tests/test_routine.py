@@ -119,6 +119,25 @@ class UniverseReplay(unittest.TestCase):
         self.assertEqual(got["vwap"], (131, 59, 63, 9, 0, -0.024, -3539.05))
         self.assertEqual(got["ema"], (106, 31, 58, 17, 11, 0.027, -2707.61))
         self.assertEqual(got["supertrend_rsi"], (61, 2, 18, 41, 0, -0.049, -1720.44))
+        # the two published rules need the daily bundle: ATR, volume and the previous close before the day
+        import gzip
+        with gzip.open(os.path.join(FIX, "trader-scanner", "daily-2026-11-04.json.gz"), "rt", encoding="utf-8") as fh:
+            dbars = json.load(fh)["bars"]
+        extras = tm.daily_extras(dbars, day)
+        self.assertEqual(len(extras), 174)
+        self.assertEqual({k: round(v, 2) for k, v in extras["TATACONSUM"].items()},
+                         {"atr14": 25.06, "avg_vol14": 2137122.43, "prev_close": 1028.9})
+        for strat in ("orb_play", "half_hour"):
+            s = tm.universe_summary(tm.universe_replay(day, sessions, dict(base, strategy=strat), rows, None, None, extras))
+            got[strat] = (s["breakouts"], s["target"], s["stop"], s["flat"], s["avg_R"], s["gross"], s["charges"], s["net"],
+                          s["ledger_net"])
+        self.assertEqual(got["orb_play"], (7, 0, 6, 1, 0.481, 55.67, 188.97, -133.3, -43.04))   # 10 % ATR stops: 6 of 7
+        self.assertEqual(got["half_hour"], (132, 0, 0, 132, 0.044, 1128.02, 3367.07, -2239.05, -24.69))  # gross up, charges 3x
+        rec = tm.universe_replay(day, sessions, dict(base, strategy="orb_play"), rows, None, None, extras)
+        self.assertEqual([(e["symbol"], e["at"], e["fill"], e["stop"], e["why"]) for e in rec["every"]][:2],
+                         [("ICICIGI", "09:35", 1570.0, 1565.7, "stop"), ("DEVYANI", "09:35", 119.27, 118.76, "stop")])
+        self.assertTrue(all(e["target"] is None for e in rec["every"]))
+        self.assertIsNone(tm.first_signal("orb_play", sessions["TATACONSUM"], base, 0.1, 9 * 60 + 35, 15 * 60, 3))   # no extra
         # the definitions, on one made-up session
         flat = [{"o": 100.0, "h": 100.5, "l": 99.5, "c": 100.0, "v": 1000}] * 75
         self.assertIsNone(tm.first_signal("vwap", flat, base, 0.05, 9 * 60 + 35, 15 * 60, 3))
@@ -131,6 +150,20 @@ class UniverseReplay(unittest.TestCase):
         self.assertAlmostEqual(sig["stop"], 99.2 - (sig["target"] - 99.2), places=1)
         with self.assertRaises(tm.TMError):
             tm.first_signal("martingale", flat, base, 0.05, 0, 900, 3)
+        # half_hour: up first half hour against the previous close, in at the 14:45 open, no target
+        ex = dict(base, _extra={"prev_close": 99.0, "atr14": 2.0})
+        sig = tm.first_signal("half_hour", flat, ex, 0.05, 9 * 60 + 35, 15 * 60 + 30, 3)
+        self.assertEqual((sig["k"], tm.clock(sig["close_min"]), sig["entry"], sig["stop"], sig["target"]), (65, "14:45", 100.0, 98.0, None))
+        self.assertIsNone(tm.first_signal("half_hour", flat, dict(base, _extra={"prev_close": 101.0}), 0.05, 575, 930, 3))
+        # orb_play: the first bar must close up; the stop order at its high fills on the first bar through it
+        up = [dict(b) for b in flat]
+        up[0] = {"o": 100.0, "h": 101.0, "l": 99.8, "c": 100.8, "v": 5000}
+        up[7] = {"o": 100.9, "h": 101.4, "l": 100.7, "c": 101.2, "v": 1000}
+        ex = dict(base, _extra={"atr14": 2.0, "avg_vol14": 100000.0})
+        sig = tm.first_signal("orb_play", up, ex, 0.05, 9 * 60 + 35, 15 * 60, 3)
+        self.assertEqual((sig["k"], sig["walk_from"], sig["fill"], sig["stop"], sig["target"]), (7, 7, 101.0, 100.8, None))
+        self.assertAlmostEqual(sig["rank"], 0.05)
+        self.assertIsNone(tm.first_signal("orb_play", flat, ex, 0.05, 575, 900, 3))          # first bar flat: no direction
 
     def test_cli(self):
         with tempfile.TemporaryDirectory() as tmp:

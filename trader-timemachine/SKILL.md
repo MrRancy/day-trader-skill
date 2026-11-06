@@ -131,6 +131,8 @@ openalgo.in shows, EMA 9/21 on a NIFTY future, lost with a 28 % win rate):
 | `vwap` | a close at least 0.4 % (`--vwap-pct`) under the session VWAP: "buy the dip" | the same distance under the entry | that bar's VWAP |
 | `ema` | EMA 9 crosses above EMA 21 on the day's 5-minute closes (both need 21 bars, so no cross before 11:00: use `--cutoff none`) | one ATR(14) under the entry | R x risk, or the crossunder |
 | `supertrend_rsi` | 5-minute Supertrend(10, 3) turns up with RSI(14) between 50 and 70 | the Supertrend line | R x risk |
+| `orb_play` | Zarattini, Barbon and Aziz (2024), long side: a 5-minute range whose first bar closed up; a stop order at its high fills on the first bar through it; only the top 20 charts by relative volume (`--top-n`; the first bar's volume over the 14-day average daily volume, a proxy until 14 days of 5-minute bars exist). Needs `--daily` | 10 % of the 14-day ATR under the fill | none: flat at 15:15 |
+| `half_hour` | Gao, Han, Li and Zhou (2018): the first half hour (to 09:45) up against the previous close, then long the last half hour, in at the 14:45 open. Needs `--daily` and `--cutoff none` | one 14-day ATR under the entry (the paper has none) | none: flat at 15:15 |
 
 On the 174-chart Nov 3 fixture, gate off, all day: vwap 131 signals, 59
 target, 63 stop, net Rs -3,539.05; ema 106 signals, 31 target, 58 stop, 11

@@ -855,7 +855,7 @@ def cmd_chart(a):
 U_FLAT_MIN = 15 * 60 + 15        # flat at the close of the bar ending 15:15
 U_DEFAULTS = {"target_r": 2.0, "gate_pct": 65.0, "gate_time": "10:00", "cutoff": "11:00", "budget": 10000.0,
               "max_trades": 2, "max_loss_pct": 3.0, "position_pct": 75.0, "min_price": 50.0, "or_minutes": 15,
-              "first_entry": "09:35"}
+              "first_entry": "09:35", "top_n": 20}
 
 
 def load_universe(path, day=None):
@@ -914,6 +914,11 @@ STRATEGIES = {
            "cannot come before 11:00); stop one ATR(14) under the entry; target R x risk; exit on the crossunder",
     "supertrend_rsi": "5-minute Supertrend(10, 3) turns up with RSI(14) between 50 and 70; stop at the Supertrend "
                       "line; target R x risk",
+    "orb_play": "Zarattini, Barbon and Aziz (2024), long side: a 5-minute range whose first bar closed up, a stop "
+                "order at its high, the stop 10 % of the 14-day ATR under the fill, no target, flat at 15:15; the top "
+                "N charts by relative volume (--top-n, 20); needs --daily",
+    "half_hour": "Gao, Han, Li and Zhou (2018): the first half hour up against the previous close, then long the last "
+                 "half hour (14:45 open to 15:15 close); stop one 14-day ATR under; needs --daily and --cutoff none",
 }
 
 
@@ -1016,10 +1021,65 @@ def first_signal(strategy, bars, rule, tick, lo_min, hi_min, n_or):
                 return {"k": k, "close_min": m, "entry": entry, "stop": stop, "target": _target(entry, risk, r, tick),
                         "rule_exit": None}
         return None
+    if strategy == "orb_play":
+        # Zarattini, Barbon and Aziz (2024), long side: a 5-minute range; the first bar must close up; a stop
+        # order at its high fills on the first later bar that trades through it; the stop sits 10 % of the
+        # 14-day ATR under the fill; no target, flat at 15:15. Ranked by relative volume (first bar's volume
+        # over the 14-day average daily volume, a proxy until 14 days of 5-minute bars exist); the caller keeps
+        # the top N. Needs the daily bundle (extra: atr14, avg_vol14).
+        extra = rule.get("_extra") or {}
+        if not extra.get("atr14") or not extra.get("avg_vol14"):
+            return None
+        b0 = bars[0]
+        if b0["c"] <= b0["o"] or extra["atr14"] < 0.01 * b0["c"]:
+            return None
+        or_high = b0["h"]
+        for k in range(1, SESSION_BARS):
+            if bars[k]["h"] >= or_high:
+                ok, m = window(k)
+                if not ok:
+                    return None
+                fill = round(max(or_high, bars[k]["o"]), 2)
+                stop = tick_away(fill - 0.10 * extra["atr14"], True, tick)
+                if fill - stop <= 0:
+                    return None
+                return {"k": k, "close_min": m, "entry": fill, "fill": fill, "walk_from": k, "stop": stop,
+                        "target": None, "rule_exit": None, "rank": b0["v"] / extra["avg_vol14"]}
+        return None
+
+    if strategy == "half_hour":
+        # Gao, Han, Li and Zhou (2018): when the first half hour (to 09:45) is up against the previous close,
+        # hold the last half hour: in at the 14:45 open, out flat at 15:15. No stop in the paper; here one
+        # 14-day ATR under the entry so a crash is capped. Needs the daily bundle (extra: prev_close, atr14).
+        extra = rule.get("_extra") or {}
+        prev = extra.get("prev_close") or bars[0]["o"]
+        if bars[5]["c"] <= prev:
+            return None
+        k = (14 * 60 + 45 - OPEN_MIN) // 5 - 1        # the bar that closes at 14:45
+        ok, m = window(k)
+        if not ok:
+            return None
+        entry = round(closes[k], 2)
+        a = extra.get("atr14") or entry * 0.01
+        stop = tick_away(entry - a, True, tick)
+        return {"k": k, "close_min": m, "entry": entry, "stop": stop, "target": None, "rule_exit": None}
+
     raise TMError("unknown strategy %r: one of %s" % (strategy, ", ".join(STRATEGIES)))
 
 
-def universe_replay(day, sessions, rule, rows=None, rates=None, scores=None):
+def daily_extras(daily_bars, day, n=14):
+    """{symbol: {"atr14", "avg_vol14", "prev_close"}} from the daily bars dated before `day`."""
+    out = {}
+    for sym, bars in (daily_bars or {}).items():
+        bs = sorted((b for b in bars if ist_of(b["ts"]).date().isoformat() < day), key=lambda b: b["ts"])
+        if len(bs) < n + 1:
+            continue
+        atr = trader_data.atr_series([b["h"] for b in bs], [b["l"] for b in bs], [b["c"] for b in bs], n)[-1]
+        out[sym] = {"atr14": atr, "avg_vol14": sum(b["v"] for b in bs[-n:]) / float(n), "prev_close": bs[-1]["c"]}
+    return out
+
+
+def universe_replay(day, sessions, rule, rows=None, rates=None, scores=None, extras=None):
     """One day, one rule, every chart. Returns the day's record.
 
     rule: target_r, gate_pct (0 = no gate), gate_time, cutoff ("" = none), budget, max_trades, max_loss_pct,
@@ -1050,7 +1110,8 @@ def universe_replay(day, sessions, rule, rows=None, rates=None, scores=None):
         if bars[0]["o"] < rule["min_price"]:
             continue
         tick = trader_data.tick_size(sym, bars[0]["c"], rows)[0]
-        sig = first_signal(strategy, bars, rule, tick, lo_min, hi_min, n_or)
+        srule = dict(rule, _extra=(extras or {}).get(sym)) if extras is not None else rule
+        sig = first_signal(strategy, bars, srule, tick, lo_min, hi_min, n_or)
         if sig is None:
             continue
         if rule.get("min_score") is not None:
@@ -1060,29 +1121,33 @@ def universe_replay(day, sessions, rule, rows=None, rates=None, scores=None):
         traded = sum(b["c"] * b["v"] for b in bars[:n_or])
         hits.append((sig["close_min"], -traded, sym, sig))
     hits.sort(key=lambda h: h[:3])
+    if rule.get("top_n") and hits and "rank" in hits[0][3]:
+        # stocks in play: only the top N by relative volume, then back into trigger order
+        hits = sorted(hits, key=lambda h: -h[3]["rank"])[:int(rule["top_n"])]
+        hits.sort(key=lambda h: h[:3])
     cash, trades, lost, open_until = float(rule["budget"]), 0, False, -1
     for close_min, _, sym, sig in hits:
         bars = sessions[sym]
         kk = sig["k"]
-        if kk + 1 >= SESSION_BARS:
+        start = sig.get("walk_from", kk + 1)       # a stop-order entry fills on the trigger bar itself
+        if start >= SESSION_BARS:
             continue
-        fill_bar = bars[kk + 1]
-        fill_close_min = OPEN_MIN + 5 * (kk + 2)
+        fill_close_min = OPEN_MIN + 5 * (start + 1)
         if fill_close_min > U_FLAT_MIN:
             continue
         entry, stop, target = sig["entry"], sig["stop"], sig["target"]
-        fill = fill_bar["o"]
+        fill = sig.get("fill", bars[start]["o"])
         risk = round(entry - stop, 2)
-        if risk <= 0 or fill - stop <= 0 or target <= fill:
+        if risk <= 0 or fill - stop <= 0 or (target is not None and target <= fill):
             continue
         ex = why = None
-        for i in range(kk + 1, SESSION_BARS):
+        for i in range(start, SESSION_BARS):
             b = bars[i]
             end_min = OPEN_MIN + 5 * (i + 1)
             if b["l"] <= stop:
                 ex, why, when = stop, "stop", end_min
                 break
-            if b["h"] >= target:
+            if target is not None and b["h"] >= target:
                 ex, why, when = target, "target", end_min
                 break
             if sig.get("rule_exit") is not None and i >= sig["rule_exit"] and i > kk + 1:
@@ -1156,8 +1221,9 @@ def render_universe(rec, label):
         "{:,.0f}".format(rec["budget"]), r["max_trades"], "" if r["max_trades"] == 1 else "s", "%g" % r["max_loss_pct"],
         ", over after a loss" if r.get("stop_after_loss") else ""))
     for t in rec["ledger"]:
-        out.append("    %s %-12s %d at %.2f, stop %.2f, target %.2f -> %s %.2f at %s: %s (charges Rs %.2f)"
-                   % (t["at"], t["symbol"], t["qty"], t["fill"], t["stop"], t["target"], t["why"], t["exit"], t["when"],
+        out.append("    %s %-12s %d at %.2f, stop %.2f, target %s -> %s %.2f at %s: %s (charges Rs %.2f)"
+                   % (t["at"], t["symbol"], t["qty"], t["fill"], t["stop"],
+                      ("%.2f" % t["target"]) if t["target"] is not None else "none", t["why"], t["exit"], t["when"],
                       rupees(t["net"]), t["charges"]))
     if not rec["ledger"]:
         out.append("    no trade could be sized")
@@ -1200,20 +1266,28 @@ def cmd_universe(a):
     if a.master:
         rows = trader_data.parse_instruments(trader_data.read_text(a.master))
     day, sessions = load_universe(a.bundle, a.date)
-    scores = None
-    if a.min_score is not None:
-        if not a.daily:
-            raise TMError("--min-score needs --daily, a saved daily bundle")
-        scores = {}
+    scores = extras = None
+    needs_daily = a.min_score is not None or rule["strategy"] in ("orb_play", "half_hour") or a.others
+    if needs_daily and not a.daily:
+        if a.min_score is not None or rule["strategy"] in ("orb_play", "half_hour"):
+            raise TMError("%s needs --daily, a saved daily bundle (scan.py daily --save)"
+                          % ("--min-score" if a.min_score is not None else rule["strategy"]))
+    if a.daily:
         opener = gzip.open if a.daily.endswith(".gz") else open
         with opener(a.daily, "rt", encoding="utf-8") as fh:
             ddoc = json.load(fh)
-        for sym, bars in (ddoc.get("bars") or {}).items():
-            bs = sorted((b for b in bars if ist_of(b["ts"]).date().isoformat() < day), key=lambda b: b["ts"])
-            if len(bs) >= 51:
-                sc = trader_data.score_card([b["h"] for b in bs], [b["l"] for b in bs], [b["c"] for b in bs])
-                scores[sym] = sc["score"] if sc else None
-    rec = universe_replay(day, sessions, rule, rows, trader_data.CHARGE_RATES, scores)
+        dbars = ddoc.get("bars") or {}
+        extras = daily_extras(dbars, day)
+        if a.min_score is not None:
+            scores = {}
+            for sym, bars in dbars.items():
+                bs = sorted((b for b in bars if ist_of(b["ts"]).date().isoformat() < day), key=lambda b: b["ts"])
+                if len(bs) >= 51:
+                    sc = trader_data.score_card([b["h"] for b in bs], [b["l"] for b in bs], [b["c"] for b in bs])
+                    scores[sym] = sc["score"] if sc else None
+    if a.top_n is not None:
+        rule["top_n"] = int(a.top_n)
+    rec = universe_replay(day, sessions, rule, rows, trader_data.CHARGE_RATES, scores, extras)
     base = None
     if a.compare:
         brule = dict(rule, target_r=1.0, gate_pct=0.0, cutoff="", stop_after_loss=False, max_trades=3, strategy="orb")
@@ -1224,8 +1298,11 @@ def cmd_universe(a):
         for strat in sorted(STRATEGIES):
             if strat == rule["strategy"]:
                 continue
-            orule = dict(rule, strategy=strat, cutoff="" if strat == "ema" else rule["cutoff"])
-            others.append(universe_summary(universe_replay(day, sessions, orule, rows, trader_data.CHARGE_RATES, scores)))
+            if strat in ("orb_play", "half_hour") and extras is None:
+                continue                                   # need the daily bundle
+            orule = dict(rule, strategy=strat, cutoff="" if strat in ("ema", "half_hour") else rule["cutoff"])
+            others.append(universe_summary(universe_replay(day, sessions, orule, rows, trader_data.CHARGE_RATES, scores,
+                                                           extras)))
     doc = {"created_by": "trader-timemachine", "mode": "universe", "bundle": os.path.basename(a.bundle),
            "summary": universe_summary(rec), "rule": rule, "ledger": rec["ledger"],
            "every": rec["every"] if a.keep_every else None,
@@ -1295,6 +1372,7 @@ def main(argv=None):
     p.add_argument("--strategy", default="orb", choices=sorted(STRATEGIES),
                    help="the entry rule to replay (default orb); see STRATEGIES in this file")
     p.add_argument("--vwap-pct", type=float, help="vwap: how far under VWAP a close must be, percent (default 0.4)")
+    p.add_argument("--top-n", type=int, help="orb_play: how many charts by relative volume (default 20)")
     p.add_argument("--target", help="1R, 1.5R, 2R (default 2R)")
     p.add_argument("--gate", type=float, help="breadth gate percent at gate_time; 0 = no gate (default: config, 65)")
     p.add_argument("--cutoff", help="no entries after HH:MM (default 11:00; none = no cutoff)")
