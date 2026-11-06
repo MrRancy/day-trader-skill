@@ -174,7 +174,7 @@ class TheCli(Scratch):
         self.assertIn("$ alerts.py check --now 2026-11-06 10:30", out)
         self.assertIn("$ ticket.py paper tick --now 2026-11-06 10:30 --price 395", out)
         code, out, _ = run(["evening", "--dry-run", "--now", "2026-11-06 16:00", "--note", "quiet day"])
-        self.assertIn("$ scan.py orb --now 2026-11-06 15:00 --save trader/replays/orb5m-2026-11-06.json.gz --no-trend", out)
+        self.assertIn("$ scan.py orb --now 2026-11-06 15:00 --until 15:30 --save trader/replays/orb5m-2026-11-06.json.gz --no-trend", out)
         self.assertIn("$ timemachine.py universe trader/replays/orb5m-2026-11-06.json.gz --compare --others --write", out)
         self.assertIn("$ check.py journal --today 2026-11-06 --note quiet day", out)
         code, _, err = run(["status", "--now", "6 Nov 10:00"])

@@ -315,16 +315,22 @@ def cmd_evening(a, now, cfg):
     os.makedirs(FILES["replays"], exist_ok=True)
     bundle = "%s/orb5m-%s.json.gz" % (FILES["replays"], today)
     if not os.path.exists(bundle) or a.refetch:
+        # --until 15:30 overrides the config's no_entries_after: this run saves the whole session's bars,
+        # it does not look for an entry. The bundle must exist afterwards or the evening stops here.
         run_step("saving the day's 5-minute bars for every chart (about ten minutes)",
-                 [script("scanner"), "orb", "--now", "%s 15:00" % today, "--save", bundle, "--no-trend",
-                  "--out", "%s/watchlist-%s.json" % (FILES["replays"], today), "--show", "0"], a.dry_run)
+                 [script("scanner"), "orb", "--now", "%s 15:00" % today, "--until", "15:30", "--save", bundle,
+                  "--no-trend", "--out", "%s/watchlist-%s.json" % (FILES["replays"], today), "--show", "0"],
+                 a.dry_run)
+        if not a.dry_run and not os.path.exists(bundle):
+            raise DayError("the scanner did not save %s; read its message above, then run day.py evening again" % bundle)
     else:
         print("== bars already saved: %s" % bundle)
-    run_step("the evening replay", [script("timemachine"), "universe", bundle, "--compare", "--others", "--write"], a.dry_run)
+    run_step("the evening replay", [script("timemachine"), "universe", bundle, "--compare", "--others", "--write"],
+             a.dry_run, ok_codes=(0,))
     notes = []
     for n in a.note or []:
         notes += ["--note", n]
-    run_step("the journal", [script("risk"), "journal", "--today", today] + notes, a.dry_run)
+    run_step("the journal", [script("risk"), "journal", "--today", today] + notes, a.dry_run, ok_codes=(0,))
     print("Evening done. Friday: check.py review --days 7.")
     return 0
 
