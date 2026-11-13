@@ -20,6 +20,7 @@
   "stop_limit_buffer_pct": 0.25,
   "broker": "indstocks",
   "paper": true,
+  "paper_start": "2026-11-13",
   "blocked": [],
   "allow_fno": false,
   "allow_margin": false,

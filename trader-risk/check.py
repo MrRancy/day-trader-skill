@@ -750,10 +750,25 @@ def _day_of(doc, *keys):
     return None
 
 
-def journal_entry(today, files, notes=(), existing=None):
+def paper_day(start, today):
+    """Trading days from the paper month's first day to `today`, both counted (start itself is day 1).
+    None before the start, without a start, or on a day NSE does not trade."""
+    if not start:
+        return None
+    d0, d1 = datetime.date.fromisoformat(start), datetime.date.fromisoformat(today)
+    if d1 < d0 or not trader_data.trading_day(d1)[0]:
+        return None
+    n, d = 0, d0
+    while d <= d1:
+        n += 1 if trader_data.trading_day(d)[0] else 0
+        d += datetime.timedelta(days=1)
+    return n
+
+
+def journal_entry(today, files, notes=(), existing=None, paper_start=None):
     """One day's record from the state files that match `today`. Pure: files is {name: doc or None}."""
     j = dict(existing or {})
-    j.update({"created_by": "trader-risk", "date": today})
+    j.update({"created_by": "trader-risk", "date": today, "paper_day": paper_day(paper_start, today)})
     b = files.get("breadth")
     j["breadth"] = ({"time": b.get("time"), "pct": b.get("pct"), "open": b.get("open"), "reason": b.get("reason")}
                     if b and _day_of(b, "date") == today else None)
@@ -807,7 +822,7 @@ def journal_entry(today, files, notes=(), existing=None):
 
 
 def render_journal(j):
-    out = ["Journal %s" % j["date"]]
+    out = ["Journal %s%s" % (j["date"], ", paper day %d" % j["paper_day"] if j.get("paper_day") else "")]
     b = j.get("breadth")
     out.append("  gate      %s" % ("%s at %s: %s%%, %s" % ("open" if b["open"] else "closed", b["time"], b["pct"], b["reason"])
                                   if b else "no breadth reading"))
@@ -916,7 +931,8 @@ def cmd_journal(a, now):
              "risk": read_json(a.out, "risk", required=False),
              "ledger": read_json(a.paper_ledger, "paper ledger", required=False),
              "replay": read_json(os.path.join(a.replays_dir, "%s.json" % today), "replay", required=False)}
-    j = journal_entry(today, files, a.note or [], existing)
+    cfg = read_json(a.config, "config", required=False) or {}
+    j = journal_entry(today, files, a.note or [], existing, cfg.get("paper_start"))
     if not a.no_write:
         os.makedirs(a.journal_dir, exist_ok=True)
         with open(path, "w", encoding="utf-8") as fh:

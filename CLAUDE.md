@@ -140,8 +140,8 @@ The skills are installed as directory junctions under .claude/skills
        "fired N: target/stop/neither" form, no win-rate language.
     e. Tests reproduce every number; stdlib only; Wilder smoothing for RSI,
        ATR and ADX, EMA seeded with the SMA.
-11. The paper month (built 2026-11-05 evening, paper trading from
-    2026-11-06 for 3-4 weeks, then a Rs 10,000 real account with 1-2 trades
+11. The paper month (built 2026-11-05 evening; paper day 1 is 2026-11-13,
+    "paper_start" in trader/config.json, Nov 6 was a dry run; 3-4 weeks, then a Rs 10,000 real account with 1-2 trades
     a day, then Zerodha via step 9 for its Rs 20-or-0.03 % brokerage).
     Three whole-universe days (Nov 3-5, bundles in trader/replays/,
     gitignored) showed: charges beat the gross loss on soft days, a 10:00

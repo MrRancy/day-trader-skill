@@ -273,6 +273,18 @@ class RiskLimits(unittest.TestCase):
 
 
 class JournalAndReview(unittest.TestCase):
+    def test_paper_day_counts_trading_days_from_the_start(self):
+        # The paper month started Fri 2026-11-13; the 24th is Guru Nanak Jayanti.
+        self.assertEqual(check.paper_day("2026-11-13", "2026-11-13"), 1)
+        self.assertEqual(check.paper_day("2026-11-13", "2026-11-16"), 2)
+        self.assertEqual(check.paper_day("2026-11-13", "2026-11-25"), 8)
+        self.assertIsNone(check.paper_day("2026-11-13", "2026-11-06"))
+        self.assertIsNone(check.paper_day("2026-11-13", "2026-11-14"))
+        self.assertIsNone(check.paper_day(None, "2026-11-13"))
+        j = check.journal_entry("2026-11-13", {}, paper_start="2026-11-13")
+        self.assertEqual(j["paper_day"], 1)
+        self.assertTrue(check.render_journal(j).startswith("Journal 2026-11-13, paper day 1"))
+
     def files(self):
         return {
             "breadth": {"date": "2026-11-03", "time": "10:00", "pct": 62.6, "open": False, "reason": "under the gate"},
