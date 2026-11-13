@@ -765,6 +765,12 @@ def paper_day(start, today):
     return n
 
 
+def _scan_day(w):
+    """The day a watchlist belongs to: when it was made. A daily scan's as_of is the previous close, so the
+    morning scan of the 13th says "2026-11-12 close" and would otherwise land in the 12th's journal."""
+    return (w.get("created_at") or w.get("as_of") or "")[:10]
+
+
 def journal_entry(today, files, notes=(), existing=None, paper_start=None):
     """One day's record from the state files that match `today`. Pure: files is {name: doc or None}."""
     j = dict(existing or {})
@@ -774,7 +780,7 @@ def journal_entry(today, files, notes=(), existing=None, paper_start=None):
                     if b and _day_of(b, "date") == today else None)
     w = files.get("watchlist")
     j["scan"] = ({"mode": w.get("mode"), "as_of": w.get("as_of"), "hits": len(w.get("hits") or []),
-                  "scanned": w.get("scanned")} if w and (w.get("as_of") or "")[:10] == today else None)
+                  "scanned": w.get("scanned")} if w and _scan_day(w) == today else None)
     e = files.get("entry")
     j["entry"] = ({"symbol": e.get("symbol"), "status": e.get("status"), "time": e.get("time"),
                    "price": e.get("price")} if e and _day_of(e, "date") == today else None)

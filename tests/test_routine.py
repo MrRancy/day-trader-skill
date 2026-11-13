@@ -284,6 +284,10 @@ class JournalAndReview(unittest.TestCase):
         j = check.journal_entry("2026-11-13", {}, paper_start="2026-11-13")
         self.assertEqual(j["paper_day"], 1)
         self.assertTrue(check.render_journal(j).startswith("Journal 2026-11-13, paper day 1"))
+        # The morning's daily scan is "as of" the previous close but belongs to the day it was made.
+        w = {"mode": "daily", "created_at": "2026-11-13T09:06:59+05:30", "as_of": "2026-11-12 close", "hits": [], "scanned": 506}
+        self.assertIsNone(check.journal_entry("2026-11-12", {"watchlist": w})["scan"])
+        self.assertEqual(check.journal_entry("2026-11-13", {"watchlist": w})["scan"]["scanned"], 506)
 
     def files(self):
         return {
