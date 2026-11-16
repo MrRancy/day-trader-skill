@@ -120,6 +120,11 @@ in trader-budget turns them on):
   today (a sell in `trader/paper.json` with a `pnl`), every further entry is
   blocked for the day. Live fills are not read yet; with `"paper": false` the
   tool says so.
+- `max_charges_pct_of_risk` (15): the cost check. Round-trip charges at the
+  stop over that share of the rupees at risk block the entry ("cost: ...").
+  At Rs 10,000 a trade the charges are about Rs 27, so a 15 % cap needs
+  about Rs 180 at risk: a stop of 2.4 % on a Rs 7,500 position. Tight stops
+  on a small account are mostly charges.
 
 ## The journal and the review
 
@@ -133,9 +138,19 @@ breadth reading, the scan, the entry, the plan, the Time Machine's verdict
 and history, the risk verdicts, every paper fill with its result, the day's
 trades (closed, won, lost, gross, charges, net), the evening replay's summary
 and baseline from `trader/replays/DATE.json`, and your notes, which
-accumulate across runs. `review` rolls the journals up over the last N days:
-trades and net, the gate's open days, the replay's rule against its
-baseline, and results by symbol. Both print counts, never a verdict.
+accumulate across runs. Each closed paper trade is kept with its net and its
+rupee risk (`paper_trades`), and the replay's ledger trades with theirs.
+
+`review` rolls the journals up over the last N days: trades and net, the
+gate's open days, the replay's rule against its baseline, results by symbol,
+then the metrics for the paper trades and for the replay rule's ledger: net
+R a trade, expectancy (net rupees a trade) with its 95 % range, profit
+factor, max drawdown and net by week.
+
+The last line is the go/no-go, decided 2026-11-16, before any real money:
+net expectancy above zero on the held-out replay days (`timemachine.py
+multiday --write trader/replays/multiday.json`) AND on at least 200 paper
+trades since `paper_start`. Until both hold it prints NOT MET and why.
 
 ## Steps
 

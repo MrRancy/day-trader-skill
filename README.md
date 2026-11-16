@@ -196,6 +196,28 @@ days. A 10:00 breadth gate sat out both soft days; a 2R target beat 1R; the
 6-point score card did not help. Three days fitted those settings, which is
 why the evening replay re-scores them every day against the baseline.
 
+### Evidence before money
+
+The paper month alone is too slow to answer whether the rule works: two
+trades on the days the gate opens is ten or so a month. So the evidence
+comes from the multi-day replay over every saved session, and the paper
+month checks that the live routine behaves like the replay.
+
+```bash
+python3 trader-timemachine/timemachine.py multiday --test 20 --write trader/replays/multiday.json
+python3 trader-risk/check.py review --days 7
+```
+
+The replay changes one setting at a time against the rule, fixes the
+settings on the earlier days and scores them on the last 20, with 0.05 %
+slippage a side and stops filled at the open when a bar gaps through them.
+The review reports net R a trade, expectancy with a 95 % range, profit
+factor, max drawdown and weekly net.
+
+**Go/no-go, decided 2026-11-16.** No real money until both hold: net
+expectancy above zero on the held-out replay days, and net expectancy above
+zero over at least 200 paper trades. `check.py review` prints the verdict.
+
 ## Fine print
 
 **Not investment advice.** This is software that reads public data and does

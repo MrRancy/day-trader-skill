@@ -151,6 +151,38 @@ soft days and made Rs 30,930 on Nov 4. Charges were larger than the gross
 loss on both soft days. Three days are a baseline for the journal to beat,
 not evidence.
 
+## Many days: the rule, one change at a time
+
+```bash
+python3 "${CLAUDE_SKILL_DIR}/timemachine.py" multiday --test 20 --write trader/replays/multiday.json
+python3 "${CLAUDE_SKILL_DIR}/timemachine.py" multiday --only "gate off,rel. volume top 20" --from 2026-08-01
+```
+
+`multiday` replays every saved `trader/replays/orb5m-DATE.json.gz`, oldest
+first, with the paper rule and with the rule changed in exactly one way:
+gate off (entries still from the gate time), gate 50 or 75, target 1R or 3R,
+cutoff 12:00, 3 trades, trading on after a loss, no slippage, charges at
+most 15 % of the risk, the liquid 174 (the top 174 by average daily turnover
+on the 20 days before), the relative-volume top 20 (opening-range volume
+over the stock's own average on earlier days, chosen at 09:30 so no later
+bar picks the chart), a short side on days at or under 40 % breadth, and
+VWAP. Inputs that need history come from earlier days only, and wait for 5.
+
+The last `--test` days (20) are held out: settings are chosen on the days
+before them and only scored on the held-out days. Per half it prints the
+ledger (the Rs 10,000 day sized to the max loss) and every signal (Rs 10,000
+each, on the days the gate is open): trades, expectancy a trade with its
+95 % range, net R a trade, profit factor and max drawdown, then the rule's
+held-out weeks and the replay half of the go/no-go (held-out expectancy
+above zero). `--write` saves the summary that `check.py review` reads.
+
+Fills are honest by default: 0.05 % slippage a side on every market fill
+(`slippage_pct` in the config, `--slippage`), a stop that a later bar opens
+through fills at that open, a target is a resting limit at its price.
+`universe` takes the same `--slippage` and `--side short`, and on a
+gate-closed day it now measures every breakout ("measured, not taken") so
+the journal records what the gate kept you out of; only the ledger is empty.
+
 ## Steps
 
 1. Make sure `trader/plan.json` is today's plan from `/trader-exit`. If there

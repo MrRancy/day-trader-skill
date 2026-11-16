@@ -264,11 +264,21 @@ class Flow(unittest.TestCase):
         run(self.args("approve", "--index", "1", "--reply", "yes"))
         run(self.place_args("--index", "1", "--price", "1050.50", now="2026-11-03 10:02"))
         code, text, _ = self.tick(1039.0, "2026-11-03 11:00")
-        self.assertIn("PAPER-GTT-2: SELL 71 TATACONSUM at 1039.40 (stop-loss leg filled at its trigger (last 1039.00)), "
-                      "charges Rs 33.10. Ledger cash Rs 99,161.88", text)
+        # the last price is already through the 1039.40 stop: a stop is a market order, so it fills there
+        self.assertIn("PAPER-GTT-2: SELL 71 TATACONSUM at 1039.00 (stop-loss leg filled through its trigger 1039.40 "
+                      "(last 1039.00)), charges Rs 33.09. Ledger cash Rs 99,133.49", text)
         pd = self.paper_doc()
-        self.assertEqual((pd["cash"], pd["realized"], pd["orders"][1]["leg"]), (99161.88, -788.1, "stop-loss"))
-        self.assertEqual(self.pf_doc()["cash"], 99161.88)
+        self.assertEqual((pd["cash"], pd["realized"], pd["orders"][1]["leg"]), (99133.49, -816.5, "stop-loss"))
+        self.assertEqual(self.pf_doc()["cash"], 99133.49)
+
+    def test_slippage_on_market_fills(self):
+        with open(self.cfg) as fh:
+            cfg = json.load(fh)
+        cfg["slippage_pct"] = 0.1
+        led = ticket.Paper(os.path.join(self.d, "slip.json"), cfg)
+        # 0.1 % against you, onto the tick: up for a buy, down for a sell
+        self.assertEqual((led.slipped(1050.50, "BUY"), led.slipped(1039.40, "SELL")), (1051.6, 1038.35))
+        self.assertEqual(ticket.Paper(os.path.join(self.d, "none.json"), dict(cfg, slippage_pct=0)).slipped(1050.5, "BUY"), 1050.5)
 
     def test_the_square_off_and_the_close(self):
         self.run_risk()

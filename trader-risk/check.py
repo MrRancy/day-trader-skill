@@ -79,6 +79,8 @@ DEFAULTS = {
     "allow_short": False, "charges": dict(trader_data.CHARGE_RATES),
     # the paper-month rules (off unless the config sets them): the 10:00 breadth gate and one loss ends the day
     "breadth_gate_pct": None, "gate_time": "10:00", "stop_after_loss": False,
+    # the cost check (off unless set): round-trip charges at the stop as a share of the rupees at risk
+    "max_charges_pct_of_risk": None,
 }
 # the fields INDstocks reads (POST /order and POST /smart/order); the fingerprint covers these only
 INDSTOCKS_FIELDS = ("security_id", "exchange", "segment", "product", "txn_type", "order_type", "validity",
@@ -570,6 +572,11 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                                      "over your %s max loss per trade"
                                      % (_num(shares), _p(risk_ps), money(max_loss), money(chg), money(max_loss_net),
                                         money(cap)))
+                    cpct = _f(c.get("max_charges_pct_of_risk"))
+                    if cpct and max_loss > 0 and 100.0 * chg / max_loss > cpct + 1e-9:
+                        later.append("cost: round-trip charges %s are %.1f%% of the %s at risk at the stop, over your "
+                                     "%s%% (max_charges_pct_of_risk): the stop is too tight for the charges at this size"
+                                     % (money(chg), 100.0 * chg / max_loss, money(max_loss), _num(cpct)))
                     min_rr = _f(c.get("min_reward_risk"))
                     if target:
                         if (long and target <= ref + PAISA) or (not long and target >= ref - PAISA):
@@ -818,8 +825,22 @@ def journal_entry(today, files, notes=(), existing=None, paper_start=None):
                    "gross": round(sum(f["pnl"] for f in sells), 2),
                    "charges": round(buys_chg + sum(f["charges"] or 0 for f in sells), 2)}
     j["trades"]["net"] = round(j["trades"]["gross"] - j["trades"]["charges"], 2)
+    # each closed paper trade with its net (its sell's pnl less both legs' charges) and its rupee risk (the plan's
+    # risk per share times the shares sold, when the plan is for that symbol), for the review's metrics
+    paper = []
+    for f in sells:
+        buys = [b for b in fills if b["side"] == "BUY" and b["symbol"] == f["symbol"]]
+        bq = sum(b["qty"] or 0 for b in buys)
+        buy_chg = sum(b["charges"] or 0 for b in buys) * (f["qty"] or 0) / bq if bq else 0.0
+        p = j.get("plan")
+        rps = p.get("risk_per_share") if p and p.get("symbol") == f["symbol"] else None
+        paper.append({"date": today, "symbol": f["symbol"], "net": round(f["pnl"] - (f["charges"] or 0) - buy_chg, 2),
+                      "risk_inr": round(rps * f["qty"], 2) if rps and f["qty"] else None})
+    j["paper_trades"] = paper
     rp = files.get("replay")
-    j["replay"] = ({"rule": rp.get("summary"), "baseline": rp.get("baseline"), "others": rp.get("others")} if rp else None)
+    j["replay"] = ({"rule": rp.get("summary"), "baseline": rp.get("baseline"), "others": rp.get("others"),
+                    "ledger": [{"date": today, "symbol": t.get("symbol"), "net": t.get("net"), "risk_inr": t.get("risk_inr"),
+                                "why": t.get("why")} for t in rp.get("ledger") or []]} if rp else None)
     old = list((existing or {}).get("notes") or [])
     for n in notes:
         old.append({"at": now_ist().strftime("%H:%M"), "note": n})
@@ -857,15 +878,16 @@ def render_journal(j):
         s = rp["rule"]
         out.append("  replay    the rule on every chart: %s breakouts, %s target, %s stop, %s flat, avg R %s, net %s%s"
                    % (s.get("breakouts"), s.get("target"), s.get("stop"), s.get("flat"), s.get("avg_R"),
-                      money(s.get("net") or 0), "" if s.get("gate_open") else " (gate closed: none taken)"))
+                      money(s.get("net") or 0), "" if s.get("gate_open") else " (gate closed: measured, none taken)"))
         if rp.get("baseline"):
             bl = rp["baseline"]
             out.append("            baseline 1R no gate: %s breakouts, avg R %s, net %s"
                        % (bl.get("breakouts"), bl.get("avg_R"), money(bl.get("net") or 0)))
         for o in rp.get("others") or []:
-            out.append("            %s: %s" % (o.get("strategy"), "gate closed" if not o.get("gate_open") else
-                                              "%s signals, avg R %s, net %s" % (o.get("breakouts"), o.get("avg_R"),
-                                                                                 money(o.get("net") or 0))))
+            out.append("            %s: %s" % (o.get("strategy"), "gate closed" if not o.get("gate_open") and not o.get("breakouts")
+                                              else "%s signals, avg R %s, net %s%s" % (
+                                                  o.get("breakouts"), o.get("avg_R"), money(o.get("net") or 0),
+                                                  "" if o.get("gate_open") else " (gate closed: measured)")))
     else:
         out.append("  replay    none (timemachine.py universe --write after the close)")
     for n in j.get("notes") or []:
@@ -903,8 +925,11 @@ def review(journals):
                 s["trades"] += 1
                 s["won"] += 1 if f["pnl"] > 0 else 0
                 s["gross"] = round(s["gross"] + f["pnl"], 2)
+    paper = [t for j in days for t in j.get("paper_trades") or []]
+    replay = [t for j in days for t in ((j.get("replay") or {}).get("ledger") or []) if t.get("net") is not None]
     return {"from": days[0]["date"] if days else None, "to": days[-1]["date"] if days else None, "totals": tot,
-            "by_symbol": dict(sorted(by_sym.items(), key=lambda kv: -kv[1]["gross"]))}
+            "by_symbol": dict(sorted(by_sym.items(), key=lambda kv: -kv[1]["gross"])),
+            "paper": trader_data.trade_metrics(paper), "replay_ledger": trader_data.trade_metrics(replay)}
 
 
 def render_review(r):
@@ -921,7 +946,18 @@ def render_review(r):
     for sym, s in r["by_symbol"].items():
         out.append("  %-12s %d trade%s, %d won, gross %s" % (sym, s["trades"], "" if s["trades"] == 1 else "s", s["won"],
                                                             money(s["gross"])))
-    out.append("Counts, not a verdict. A month of these is the smallest sample worth a decision.")
+    if r.get("paper"):
+        out.append("  paper     " + trader_data.render_metrics(r["paper"]))
+    if r.get("replay_ledger"):
+        out.append("  replay    the rule's ledger: " + trader_data.render_metrics(r["replay_ledger"]))
+    wk = (r.get("paper") or {}).get("weekly") or (r.get("replay_ledger") or {}).get("weekly") or {}
+    if wk:
+        out.append("  weekly    %s%s" % ("" if (r.get("paper") or {}).get("weekly") else "(replay ledger) ",
+                                        ", ".join("%s %s" % (k, money(v)) for k, v in wk.items())))
+    g = r.get("go")
+    if g:
+        out.append("  go/no-go  %s" % ("GO: both halves met" if g["go"] else "NOT MET: " + "; ".join(g["reasons"])))
+    out.append("The 95% ranges show how little a few trades prove. Not a forecast.")
     return "\n".join(out) + "\n"
 
 
@@ -962,6 +998,21 @@ def cmd_review(a, now):
         print("No journal days between %s and %s in %s. Run check.py journal at the end of each day." % (start, today, a.journal_dir))
         return 1
     r = review(journals)
+    cfg = read_json(a.config, "config", required=False) or {}
+    since = cfg.get("paper_start")
+    every_day = []
+    if os.path.isdir(a.journal_dir):
+        for name in sorted(os.listdir(a.journal_dir)):
+            if name.endswith(".json") and (not since or name[:10] >= since) and name[:10] <= today:
+                jj = read_json(os.path.join(a.journal_dir, name), "journal", required=False)
+                if jj:
+                    every_day.append(jj)
+    paper_all = trader_data.trade_metrics([t for jj in every_day for t in jj.get("paper_trades") or []])
+    md = read_json(a.multiday, "multi-day replay", required=False)
+    held_out = (((md or {}).get("variants") or {}).get("rule") or {}).get("test", {}).get("ledger")
+    go, reasons = trader_data.go_no_go(held_out, paper_all)
+    r["go"] = {"go": go, "reasons": reasons, "paper_since": since, "paper_trades": paper_all["n"],
+               "held_out_expectancy": held_out.get("expectancy") if held_out else None}
     print(json.dumps(r, indent=2) if a.json else render_review(r))
     return 0
 
@@ -972,6 +1023,8 @@ def main(argv=None):
                     help="check (default) the orders; journal: write today's record; review: roll the journals up")
     ap.add_argument("--note", action="append", help="journal: a note to append (repeatable)")
     ap.add_argument("--days", type=int, default=7, help="review: how many days back")
+    ap.add_argument("--multiday", default=os.path.join("trader", "replays", "multiday.json"),
+                    help="review: the multi-day replay summary for the go/no-go (timemachine.py multiday --write)")
     ap.add_argument("--journal-dir", default=JOURNAL_DIR)
     ap.add_argument("--replays-dir", default=REPLAYS_DIR, help="where timemachine.py universe --write saves")
     ap.add_argument("--watchlist", default="trader/watchlist.json")

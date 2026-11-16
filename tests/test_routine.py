@@ -93,7 +93,12 @@ class UniverseReplay(unittest.TestCase):
         rule = dict(tm.U_DEFAULTS, stop_after_loss=True)
         rec = tm.universe_replay(day, sessions, rule, rows)
         s = tm.universe_summary(rec)
-        self.assertEqual((s["breadth_pct"], s["gate_open"], s["breakouts"]), (62.6, False, 0))
+        # gate the trading, not the measurement: the closed day still scores its 32 breakouts, the ledger is empty
+        self.assertEqual((s["breadth_pct"], s["gate_open"], s["breakouts"]), (62.6, False, 32))
+        self.assertEqual((s["target"], s["stop"], s["flat"], s["avg_R"], s["net"], rec["ledger"]), (5, 14, 13, 0.105, -648.44, []))
+        self.assertIn("measured, not taken: every breakout at Rs 10,000 each: 32 seen", tm.render_universe(rec, "x"))
+        old = tm.universe_summary(tm.universe_replay(day, sessions, dict(rule, measure_closed=False), rows))
+        self.assertEqual(old["breakouts"], 0)
         base = dict(rule, target_r=1.0, gate_pct=0.0, cutoff="", stop_after_loss=False, max_trades=3)
         rec = tm.universe_replay(day, sessions, base, rows)
         s = tm.universe_summary(rec)
@@ -107,6 +112,76 @@ class UniverseReplay(unittest.TestCase):
         s = tm.universe_summary(tm.universe_replay(day, sessions, two_r, rows))
         self.assertEqual((s["breakouts"], s["target"], s["stop"], s["flat"], s["avg_R"], s["net"]), (75, 13, 33, 29, 0.109, -1542.54))
         self.assertEqual(s["ledger_net"], 60.32)               # HDFCBANK alone: flat at 724.70 against a 2R target
+
+    def test_slippage_short_side_selection_and_the_cost_filter(self):
+        day, sessions = tm.load_universe(ORB)
+        rows = tm.trader_data.parse_instruments(tm.trader_data.read_text(MASTER))
+        rule = dict(tm.U_DEFAULTS, stop_after_loss=True)
+        g = dict(rule, gate_pct=0.0)
+
+        def run(r, extras=None):
+            rec = tm.universe_replay(day, sessions, r, rows, None, None, extras)
+            s = tm.universe_summary(rec)
+            return rec, s
+        # 0.05 % a side on every market fill: same 75 trades, Rs 631 worse than -1,542.54 without it
+        rec, s = run(dict(g, slippage_pct=0.05))
+        self.assertEqual((s["breakouts"], s["gross"], s["charges"], s["net"], s["ledger_net"]), (75, -204.29, 1969.38, -2173.67, 53.12))
+        # the short side: the first close under the range low, stop at the midpoint, 2R down
+        rec, s = run(dict(g, side="short"))
+        self.assertEqual((s["breakouts"], s["target"], s["stop"], s["flat"], s["net"]), (31, 4, 15, 12, -755.48))
+        self.assertEqual([(t["symbol"], t["side"], t["qty"], t["why"], t["net"]) for t in rec["ledger"]],
+                         [("TITAN", "short", 1, "stop", -55.7)])
+        # a short gate opens on weak days: at or under the level (62.6 % is not under 40, is under 70)
+        self.assertFalse(run(dict(rule, side="short", gate_pct=40.0))[1]["gate_open"])
+        rec, s = run(dict(rule, side="short", gate_pct=70.0))
+        self.assertEqual((s["gate_open"], s["breakouts"], s["net"], s["ledger_net"]), (True, 15, -35.9, 11.75))
+        # charges over 15 % of the rupee risk: at Rs 10,000 a trade only 5 of 75 breakouts have stops wide enough
+        self.assertEqual(run(dict(g, max_charges_pct_of_risk=15))[1]["breakouts"], 5)
+        # a fixed symbol set
+        self.assertEqual(run(dict(g, symbols=["HDFCBANK", "TITAN", "RELIANCE"]))[1]["breakouts"], 1)
+        # relative volume, chosen at 09:30 from the opening range against each stock's own average
+        ex = {sym: {"or_vol_avg": sum(b["v"] for b in bars[:3])} for sym, bars in sessions.items()}
+        ex["HDFCBANK"]["or_vol_avg"] /= 10
+        rec, s = run(dict(g, rank="rvol", top_n=5), ex)
+        self.assertEqual([e["symbol"] for e in rec["every"]], ["HDFCBANK"])
+
+    def test_a_stop_gapped_through_fills_at_the_open(self):
+        bars = [{"o": 100, "h": 100.5, "l": 99.8, "c": 100, "v": 1000} for _ in range(tm.SESSION_BARS)]
+        for i in range(3):
+            bars[i] = dict(bars[i], h=101, l=98)                 # range 98-101, midpoint stop 99.50
+        bars[3] = dict(bars[3], h=102, c=101.5)               # the breakout close; fills at the next open, 100
+        bars[6] = dict(bars[6], o=97.0, h=97.5, l=96.0, c=96.5)    # opens under the stop
+        rec = tm.universe_replay("2026-11-03", {"X": bars}, dict(tm.U_DEFAULTS, gate_pct=0.0, first_entry="09:30"))
+        e = rec["every"][0]
+        self.assertEqual((e["why"], e["stop"], e["exit"]), ("stop", 99.5, 97.0))
+
+    def test_multiday_one_change_at_a_time_train_then_test(self):
+        import gzip as gz
+        import json as js
+        import tempfile
+        src = js.load(gz.open(ORB, "rt"))
+        folder = tempfile.mkdtemp()
+        for k in range(6):                               # the fixture day, shifted to six dates
+            doc = dict(src, bars={s: [dict(b, ts=b["ts"] + 86400 * k) for b in bars] for s, bars in src["bars"].items()})
+            with gz.open(os.path.join(folder, "orb5m-2026-11-%02d.json.gz" % (3 + k)), "wt") as fh:
+                js.dump(doc, fh)
+        days = tm.md_bundles(folder)
+        self.assertEqual((len(days), days[0][0], days[-1][0]), (6, "2026-11-03", "2026-11-08"))
+        rule = dict(tm.U_DEFAULTS, stop_after_loss=True, slippage_pct=0.05, strategy="orb")
+        res = tm.multiday_replay(days, rule, "gate off,liquid 174,rel. volume top 20,short below 40%")
+        self.assertEqual(sorted(res), ["gate off", "liquid 174", "rel. volume top 20", "rule", "short below 40%"])
+        # the rule: 62.6 % breadth, gate closed every day, yet every day's 32 breakouts are measured
+        self.assertEqual([(d["gate_open"], len(d["ledger"]), len(d["every"])) for d in res["rule"]["days"]], [(False, 0, 32)] * 6)
+        # the history-based variants wait for 5 earlier days, so they start on the sixth
+        self.assertEqual([d["date"] for d in res["liquid 174"]["days"]], ["2026-11-08"])
+        self.assertEqual(len(res["rel. volume top 20"]["days"][0]["every"]), 4)
+        s = tm.multiday_summary(res, 2)
+        self.assertEqual((s["days"], s["train_to"], s["test_from"]), (6, "2026-11-06", "2026-11-07"))
+        g = s["variants"]["gate off"]
+        self.assertEqual((g["train"]["ledger"]["n"], g["train"]["ledger"]["net"], g["test"]["ledger"]["net"]), (4, -517.32, -258.66))
+        self.assertEqual((g["train"]["every"]["n"], g["train"]["every"]["expectancy"]), (128, -28.74))
+        self.assertEqual(s["variants"]["rule"]["test"]["ledger"]["n"], 0)
+        self.assertIn("scored on 2026-11-07..2026-11-08 (2 days)", tm.render_multiday(s))
 
     def test_the_other_strategies_on_174_charts(self):
         day, sessions = tm.load_universe(ORB)
@@ -229,6 +304,20 @@ class RiskLimits(unittest.TestCase):
         self.assertEqual(res["pass"], 1)
         self.assertIn("gate open: 71.9% of charts above their open at 10:00 (gate 65%)", res["results"][0]["info"])
 
+    def test_the_cost_check(self):
+        opened = {"date": "2026-11-03", "time": "10:00", "pct": 71.9, "open": True, "reason": "open"}
+        res = check.check(self.orders, self.cfg, now=at("10:01"), breadth=opened)
+        self.assertEqual(res["pass"], 1)                     # off unless configured
+        tight = dict(self.cfg, max_charges_pct_of_risk=1)
+        res = check.check(self.orders, tight, now=at("10:01"), breadth=opened)
+        self.assertEqual(res["block"], 1)
+        cost = [r for r in self.reasons(res) if r.startswith("cost: ")]
+        self.assertEqual(len(cost), 1)
+        self.assertIn("of the", cost[0])
+        self.assertIn("over your 1% (max_charges_pct_of_risk)", cost[0])
+        res = check.check(self.orders, dict(self.cfg, max_charges_pct_of_risk=15), now=at("10:01"), breadth=opened)
+        self.assertEqual(res["pass"], 1)
+
     def test_one_loss_ends_the_day(self):
         ledger = {"orders": [
             {"id": "PAPER-GTT-2", "txn_type": "SELL", "status": "SUCCESS", "symbol": "BEL", "pnl": -151.7,
@@ -321,6 +410,8 @@ class JournalAndReview(unittest.TestCase):
         self.assertEqual(len(j["fills"]), 2)
         self.assertEqual(j["trades"], {"closed": 1, "won": 1, "lost": 0, "gross": 745.5, "charges": 50.46, "net": 695.04})
         self.assertEqual(j["notes"][0]["note"], "took it anyway, gate was closed: a mistake")
+        # the trade for the metrics: 745.50 less 33.54 and 16.92 of charges; risk 10.80 a share x 71
+        self.assertEqual(j["paper_trades"], [{"date": "2026-11-03", "symbol": "TATACONSUM", "net": 695.04, "risk_inr": 766.8}])
         text = check.render_journal(j)
         self.assertIn("gate      closed at 10:00: 62.6%, under the gate", text)
         self.assertIn("entry     TATACONSUM triggered 10:00 at 1050.2", text)
@@ -354,7 +445,11 @@ class JournalAndReview(unittest.TestCase):
         text = check.render_review(r)
         self.assertIn("2 journal days, 2 with a closed trade", text)
         self.assertIn("BEL          1 trade, 0 won, gross Rs -300", text)
-        self.assertIn("Counts, not a verdict", text)
+        # efficiency, not just counts: net per trade with its 95 % range, net R, profit factor, drawdown, weeks
+        self.assertEqual((r["paper"]["n"], r["paper"]["net"], r["paper"]["expectancy"], r["paper"]["profit_factor"],
+                          r["paper"]["max_drawdown"], r["paper"]["weekly"]), (2, 344.58, 172.29, 1.98, 350.46, {"2026-W45": 344.58}))
+        self.assertIn("paper     2 trades (1 won, 1 lost), net Rs +344.58; expectancy Rs +172.29 a trade (95% Rs -852.30 to Rs +1,196.88)", text)
+        self.assertIn("replay    the rule's ledger: no closed trades", text)
 
     def test_cli_round_trip(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -364,7 +459,8 @@ class JournalAndReview(unittest.TestCase):
             with open(b, "w") as fh:
                 json.dump({"date": "2026-11-03", "time": "10:00", "pct": 62.6, "open": False, "reason": "under"}, fh)
             args = ["--journal-dir", jd, "--breadth", b, "--watchlist", none, "--entry", none, "--plan", none,
-                    "--timemachine", none, "--out", none, "--paper-ledger", none, "--replays-dir", tmp]
+                    "--timemachine", none, "--out", none, "--paper-ledger", none, "--replays-dir", tmp,
+                    "--config", none, "--multiday", none]
             code, out, err = run(check, ["journal", "--today", "2026-11-03", "--note", "quiet day"] + args)
             self.assertEqual(code, 0, err)
             self.assertIn("Journal 2026-11-03", out)
@@ -374,6 +470,7 @@ class JournalAndReview(unittest.TestCase):
             self.assertEqual(code, 0, err)
             self.assertIn("1 journal day, 0 with a closed trade", out)
             self.assertIn("gate      open on 0 of 1 days read", out)
+            self.assertIn("go/no-go  NOT MET: no held-out replay trades yet (timemachine.py multiday); 0 paper trades, 200 needed", out)
             code, out, _ = run(check, ["review", "--today", "2026-10-01", "--days", "3"] + args)
             self.assertEqual(code, 1)
             self.assertIn("No journal days", out)

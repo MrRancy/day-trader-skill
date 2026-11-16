@@ -425,6 +425,88 @@ def score_card(highs, lows, closes):
             "adx": None if adx is None else round(adx, 1)}
 
 
+# ---------------------------------------------------------------- trade metrics (shared by review and the replays)
+
+def trade_metrics(trades):
+    """Efficiency of a list of closed trades, each {"date": "YYYY-MM-DD", "net": rupees after charges,
+    "risk_inr": rupees at risk at the stop (optional)}, in the order they happened.
+
+    n, won, lost, net; expectancy (mean net a trade) with a 95 % interval (normal approximation, mean +- 1.96
+    standard errors; None under 2 trades); net R a trade (net / rupee risk, only trades with a risk) with its
+    interval; profit factor (rupees won / rupees lost; None with no loss); max drawdown (the deepest fall of the
+    running net from its high, starting at 0); weekly net by ISO week."""
+    nets = [float(t["net"]) for t in trades]
+    n = len(nets)
+
+    def mean_ci(xs):
+        if not xs:
+            return None, None, None
+        m = sum(xs) / len(xs)
+        if len(xs) < 2:
+            return m, None, None
+        sd = (sum((x - m) ** 2 for x in xs) / (len(xs) - 1)) ** 0.5
+        h = 1.96 * sd / len(xs) ** 0.5
+        return m, m - h, m + h
+
+    exp, lo, hi = mean_ci(nets)
+    rs = [float(t["net"]) / float(t["risk_inr"]) for t in trades if t.get("risk_inr")]
+    r, rlo, rhi = mean_ci(rs)
+    won = sum(x for x in nets if x > 0)
+    lost = -sum(x for x in nets if x < 0)
+    peak = run = dd = 0.0
+    for x in nets:
+        run += x
+        peak = max(peak, run)
+        dd = max(dd, peak - run)
+    weekly = {}
+    for t in trades:
+        y, w, _ = datetime.date.fromisoformat(t["date"]).isocalendar()
+        key = "%d-W%02d" % (y, w)
+        weekly[key] = round(weekly.get(key, 0.0) + float(t["net"]), 2)
+
+    def rd(x, k=2):
+        return round(x, k) if x is not None else None
+
+    return {"n": n, "won": sum(1 for x in nets if x > 0), "lost": sum(1 for x in nets if x <= 0),
+            "net": round(sum(nets), 2), "expectancy": rd(exp), "expectancy_ci95": [rd(lo), rd(hi)],
+            "net_R": rd(r, 3), "net_R_ci95": [rd(rlo, 3), rd(rhi, 3)], "r_trades": len(rs),
+            "profit_factor": rd(won / lost) if lost > 0 else None, "max_drawdown": round(dd, 2),
+            "weekly": dict(sorted(weekly.items()))}
+
+
+def render_metrics(m, unit="trade"):
+    """One line: n, net, expectancy and its interval, net R, profit factor, max drawdown."""
+    if not m or not m["n"]:
+        return "no closed trades"
+
+    def rs(x):
+        return ("Rs " + "{:+,.2f}".format(x)) if x is not None else "n/a"
+    ci = m["expectancy_ci95"]
+    rci = m["net_R_ci95"]
+    return ("%d %ss (%d won, %d lost), net %s; expectancy %s a %s (95%% %s to %s); net R %s a %s (95%% %s to %s); "
+            "profit factor %s; max drawdown Rs %s" % (
+                m["n"], unit, m["won"], m["lost"], rs(m["net"]), rs(m["expectancy"]), unit, rs(ci[0]), rs(ci[1]),
+                ("%+.3f" % m["net_R"]) if m["net_R"] is not None else "n/a", unit,
+                ("%+.3f" % rci[0]) if rci[0] is not None else "n/a", ("%+.3f" % rci[1]) if rci[1] is not None else "n/a",
+                ("%.2f" % m["profit_factor"]) if m["profit_factor"] is not None else "n/a",
+                "{:,.2f}".format(m["max_drawdown"])))
+
+
+def go_no_go(replay_test, paper, min_paper_trades=200):
+    """The rule before real money (decided 2026-11-16): net expectancy above zero on the held-out replay days AND
+    on at least min_paper_trades paper trades. Both are trade_metrics() dicts (or None). Returns (go, reasons)."""
+    reasons = []
+    if not replay_test or not replay_test["n"]:
+        reasons.append("no held-out replay trades yet (timemachine.py multiday)")
+    elif replay_test["expectancy"] is None or replay_test["expectancy"] <= 0:
+        reasons.append("held-out replay expectancy %s a trade is not above zero" % replay_test["expectancy"])
+    if not paper or paper["n"] < min_paper_trades:
+        reasons.append("%d paper trades, %d needed" % (paper["n"] if paper else 0, min_paper_trades))
+    elif paper["expectancy"] is None or paper["expectancy"] <= 0:
+        reasons.append("paper expectancy %s a trade is not above zero" % paper["expectancy"])
+    return not reasons, reasons
+
+
 def next_open(d):
     """The next session's open after day d, as 'YYYY-MM-DD 09:15'."""
     nd = d + datetime.timedelta(days=1)

@@ -906,6 +906,22 @@ def u_shares_for_loss(max_loss, risk, fill, stop, rates):
     return q
 
 
+def _charges_side(q, fill, exit_price, side, rates):
+    """Round-trip charges: a long buys at the fill and sells at the exit; a short sells first, so the legs swap."""
+    if side == "short":
+        return trader_data.charges(q, exit_price, fill, rates)["total"]
+    return trader_data.charges(q, fill, exit_price, rates)["total"]
+
+
+def u_shares_for_loss_side(max_loss, fill, stop, side, rates):
+    """Whole shares whose loss at the stop, charges included, fits max_loss, for either side."""
+    risk = (stop - fill) if side == "short" else (fill - stop)
+    q = u_shares(max_loss, risk) if risk > 0 else 0
+    while q > 0 and q * risk + _charges_side(q, fill, stop, side, rates) > max_loss + 0.005:
+        q -= 1
+    return q
+
+
 STRATEGIES = {
     "orb": "the first 5-minute close above the 15-minute opening range; stop at the range midpoint; target R x risk",
     "vwap": "a 5-minute close at least vwap_pct (0.4 %) under the session VWAP; target the VWAP of that bar; stop the "
@@ -926,6 +942,10 @@ def _target(entry, risk, r, tick):
     return round(math.ceil(round((entry + r * risk) / tick, 6) - 1e-9) * tick, 2)
 
 
+def _target_short(entry, risk, r, tick):
+    return round(math.floor(round((entry - r * risk) / tick, 6) + 1e-9) * tick, 2)
+
+
 def first_signal(strategy, bars, rule, tick, lo_min, hi_min, n_or):
     """The first entry of `strategy` on one session's 75 bars whose trigger bar closes between lo_min and
     hi_min (minutes after midnight). Returns {"k", "close_min", "entry", "stop", "target", "rule_exit"} or
@@ -937,6 +957,23 @@ def first_signal(strategy, bars, rule, tick, lo_min, hi_min, n_or):
     def window(k):
         m = OPEN_MIN + 5 * (k + 1)
         return lo_min <= m <= hi_min, m
+
+    if strategy == "orb" and rule.get("side") == "short":
+        # the mirror image: the first close under the range low; stop at the midpoint, rounded up; target down
+        oh, ol = opening_range(bars, n_or)
+        for k in range(n_or, SESSION_BARS):
+            if closes[k] < ol:
+                ok, m = window(k)
+                if not ok:
+                    return None
+                entry = round(closes[k], 2)
+                stop = tick_away((oh + ol) / 2, False, tick)
+                risk = round(stop - entry, 2)
+                if risk <= 0:
+                    return None
+                return {"k": k, "close_min": m, "entry": entry, "stop": stop,
+                        "target": _target_short(entry, risk, r, tick), "rule_exit": None, "side": "short"}
+        return None
 
     if strategy == "orb":
         oh, ol = opening_range(bars, n_or)
@@ -1094,20 +1131,44 @@ def universe_replay(day, sessions, rule, rows=None, rates=None, scores=None, ext
     cut_min = parse_clock(rule["cutoff"], "cutoff") if rule.get("cutoff") else None
     first_min = parse_clock(rule["first_entry"], "first_entry")
     pct, counted = breadth_at(sessions, gate_min or 10 * 60, rule["min_price"])
-    gate_open = (not rule.get("gate_pct")) or (pct is not None and pct >= rule["gate_pct"])
+    side = rule.get("side", "long")
+    if not rule.get("gate_pct"):
+        gate_open = True
+    elif pct is None:
+        gate_open = False
+    elif side == "short":
+        gate_open = pct <= rule["gate_pct"]            # the short side trades the weak days
+    else:
+        gate_open = pct >= rule["gate_pct"]
     rec = {"date": day, "charts": len(sessions), "breadth_pct": round(pct, 1) if pct is not None else None,
            "breadth_counted": counted, "gate_open": gate_open, "rule": rule, "every": [], "ledger": [],
-           "budget": rule["budget"], "strategy": rule.get("strategy", "orb")}
-    if not gate_open:
+           "budget": rule["budget"], "strategy": rule.get("strategy", "orb"), "side": side}
+    # Gate the trading, not the measurement: a closed day still scores every signal (rec["every"]); only the
+    # ledger stays empty. measure_closed False restores the old early return.
+    if not gate_open and rule.get("measure_closed") is False:
         rec["cash_end"] = rule["budget"]
         return rec
-    # the signals, in trigger order; the most traded (rupees in the opening range) first on the same bar
+    slip = float(rule.get("slippage_pct") or 0) / 100.0
+    max_chg = rule.get("max_charges_pct_of_risk")
     strategy = rule.get("strategy", "orb")
     lo_min = first_min if not gate_min else max(first_min, gate_min)
     hi_min = cut_min or 15 * 60
+    allowed = set(rule["symbols"]) if rule.get("symbols") else None
+    if rule.get("rank") == "rvol":
+        # stocks in play, chosen at the end of the opening range: the top N by opening-range volume over the
+        # stock's own average opening-range volume on earlier days (extras[sym]["or_vol_avg"]). Known at 09:30,
+        # so no later bar decides which charts are watched.
+        ranked = []
+        for sym, bars in sessions.items():
+            avg = ((extras or {}).get(sym) or {}).get("or_vol_avg")
+            if not avg or bars[0]["o"] < rule["min_price"] or (allowed is not None and sym not in allowed):
+                continue
+            ranked.append((sum(b["v"] for b in bars[:n_or]) / avg, sym))
+        ranked.sort(reverse=True)
+        allowed = set(sym for _, sym in ranked[:int(rule.get("top_n") or 20)])
     hits = []
     for sym, bars in sessions.items():
-        if bars[0]["o"] < rule["min_price"]:
+        if bars[0]["o"] < rule["min_price"] or (allowed is not None and sym not in allowed):
             continue
         tick = trader_data.tick_size(sym, bars[0]["c"], rows)[0]
         srule = dict(rule, _extra=(extras or {}).get(sym)) if extras is not None else rule
@@ -1129,6 +1190,8 @@ def universe_replay(day, sessions, rule, rows=None, rates=None, scores=None, ext
     for close_min, _, sym, sig in hits:
         bars = sessions[sym]
         kk = sig["k"]
+        sd = sig.get("side", "long")
+        short = sd == "short"
         start = sig.get("walk_from", kk + 1)       # a stop-order entry fills on the trigger bar itself
         if start >= SESSION_BARS:
             continue
@@ -1137,18 +1200,23 @@ def universe_replay(day, sessions, rule, rows=None, rates=None, scores=None, ext
             continue
         entry, stop, target = sig["entry"], sig["stop"], sig["target"]
         fill = sig.get("fill", bars[start]["o"])
-        risk = round(entry - stop, 2)
-        if risk <= 0 or fill - stop <= 0 or (target is not None and target <= fill):
+        risk = round(abs(entry - stop), 2)
+        if short:
+            if risk <= 0 or stop - fill <= 0 or (target is not None and target >= fill):
+                continue
+        elif risk <= 0 or fill - stop <= 0 or (target is not None and target <= fill):
             continue
         ex = why = None
         for i in range(start, SESSION_BARS):
             b = bars[i]
             end_min = OPEN_MIN + 5 * (i + 1)
-            if b["l"] <= stop:
-                ex, why, when = stop, "stop", end_min
+            # a stop is a market order once touched: a later bar that opens through it fills at its open
+            if (b["h"] >= stop) if short else (b["l"] <= stop):
+                gapped = i > start and ((b["o"] >= stop) if short else (b["o"] <= stop))
+                ex, why, when = (b["o"] if gapped else stop), "stop", end_min
                 break
-            if target is not None and b["h"] >= target:
-                ex, why, when = target, "target", end_min
+            if target is not None and ((b["l"] <= target) if short else (b["h"] >= target)):
+                ex, why, when = target, "target", end_min        # a resting limit: filled at its price
                 break
             if sig.get("rule_exit") is not None and i >= sig["rule_exit"] and i > kk + 1:
                 ex, why, when = b["c"], "exit", end_min       # the strategy's own exit (an EMA crossunder)
@@ -1158,27 +1226,42 @@ def universe_replay(day, sessions, rule, rows=None, rates=None, scores=None, ext
                 break
         if ex is None:
             ex, why, when = bars[-1]["c"], "flat", CLOSE_MIN
+        # slippage, per side, on every market fill (the entry, a stop, the flat); a target is a limit order
+        f_eff = round(fill * (1 - slip) if short else fill * (1 + slip), 4)
+        x_eff = ex if why == "target" else round(ex * (1 + slip) if short else ex * (1 - slip), 4)
+        move = (f_eff - x_eff) if short else (x_eff - f_eff)
         q_all = u_shares(rule["budget"], fill)
-        chg_all = trader_data.charges(q_all, fill, ex, rates)["total"] if q_all else 0.0
+        chg_all = _charges_side(q_all, f_eff, x_eff, sd, rates) if q_all else 0.0
+        risk_all = q_all * abs(fill - stop)
         e = {"symbol": sym, "at": clock(close_min), "entry": entry, "fill": fill, "stop": stop, "target": target,
-             "risk": risk, "exit": ex, "why": why, "when": clock(when), "R": round((ex - fill) / risk, 2),
-             "qty": q_all, "gross": round(q_all * (ex - fill), 2), "charges": chg_all,
-             "net": round(q_all * (ex - fill) - chg_all, 2)}
-        rec["every"].append(e)
-        if trades >= rule["max_trades"] or lost or close_min <= open_until:
+             "risk": risk, "exit": ex, "why": why, "when": clock(when), "R": round(move / risk, 2),
+             "qty": q_all, "gross": round(q_all * move, 2), "charges": chg_all,
+             "net": round(q_all * move - chg_all, 2), "side": sd, "risk_inr": round(risk_all, 2)}
+        if max_chg is not None and q_all and risk_all > 0 and \
+                100.0 * _charges_side(q_all, fill, stop, sd, rates) / risk_all > max_chg:
+            e = None                                         # too much of the risk goes to charges at this size
+        if e is not None:
+            rec["every"].append(e)
+        if not gate_open or trades >= rule["max_trades"] or lost or close_min <= open_until:
             continue
         max_loss = rule["budget"] * rule["max_loss_pct"] / 100
-        q = u_shares_for_loss(max_loss, fill - stop, fill, stop, rates)
+        q = u_shares_for_loss_side(max_loss, fill, stop, sd, rates)
         q = min(q, u_shares(rule["budget"] * rule["position_pct"] / 100, fill), u_shares(cash, fill))
         if q < 1:
             continue
-        chg = trader_data.charges(q, fill, ex, rates)["total"]
-        pnl = round(q * (ex - fill) - chg, 2)
+        if max_chg is not None and 100.0 * _charges_side(q, fill, stop, sd, rates) / (q * abs(fill - stop)) > max_chg:
+            continue
+        chg = _charges_side(q, f_eff, x_eff, sd, rates)
+        pnl = round(q * move - chg, 2)
         cash = round(cash + pnl, 2)
         trades += 1
         lost = rule.get("stop_after_loss") and pnl < 0
         open_until = when
-        rec["ledger"].append(dict(e, qty=q, gross=round(q * (ex - fill), 2), charges=chg, net=pnl, cash_after=cash))
+        base = e or {"symbol": sym, "at": clock(close_min), "entry": entry, "fill": fill, "stop": stop,
+                     "target": target, "risk": risk, "exit": ex, "why": why, "when": clock(when),
+                     "R": round(move / risk, 2), "side": sd}
+        rec["ledger"].append(dict(base, qty=q, gross=round(q * move, 2), charges=chg, net=pnl, cash_after=cash,
+                                  risk_inr=round(q * abs(fill - stop), 2)))
     rec["cash_end"] = cash
     return rec
 
@@ -1210,13 +1293,18 @@ def render_universe(rec, label):
         s["breadth_pct"] if s["breadth_pct"] is not None else "n/a",
         ("%g%%" % r["gate_pct"]) if r.get("gate_pct") else "off",
         "OPEN" if s["gate_open"] else "CLOSED, no trades")]
+    if not s["gate_open"] and not s["breakouts"]:
+        return "\n".join(out) + "\n"
+    out.append("  %s %s at Rs %s each: %d %s, %d target, %d stop, %d flat at 15:15%s (%d of those %s the "
+               "entry); average R %+.2f; gross %s, charges %s, net %s."
+               % ("every" if s["gate_open"] else "measured, not taken: every",
+                  "signal" if s["strategy"] != "orb" else ("breakdown" if rec.get("side") == "short" else "breakout"),
+                  "{:,.0f}".format(rec["budget"]), s["breakouts"], "taken" if s["gate_open"] else "seen",
+                  s["target"], s["stop"], s["flat"], (" or on the rule's exit (%d)" % s["rule_exit"]) if s["rule_exit"] else "",
+                  s["flat_green"], "beyond" if rec.get("side") == "short" else "above",
+                  s["avg_R"] or 0.0, rupees(s["gross"]), "Rs {:,.2f}".format(s["charges"]), rupees(s["net"])))
     if not s["gate_open"]:
         return "\n".join(out) + "\n"
-    out.append("  every %s at Rs %s each: %d taken, %d target, %d stop, %d flat at 15:15%s (%d of those above the "
-               "entry); average R %+.2f; gross %s, charges %s, net %s."
-               % ("signal" if s["strategy"] != "orb" else "breakout", "{:,.0f}".format(rec["budget"]), s["breakouts"],
-                  s["target"], s["stop"], s["flat"], (" or on the rule's exit (%d)" % s["rule_exit"]) if s["rule_exit"] else "",
-                  s["flat_green"], s["avg_R"] or 0.0, rupees(s["gross"]), "Rs {:,.2f}".format(s["charges"]), rupees(s["net"])))
     out.append("  the ledger, Rs %s for the day, %d trade%s max, %s%% max loss a trade%s:" % (
         "{:,.0f}".format(rec["budget"]), r["max_trades"], "" if r["max_trades"] == 1 else "s", "%g" % r["max_loss_pct"],
         ", over after a loss" if r.get("stop_after_loss") else ""))
@@ -1260,6 +1348,9 @@ def cmd_universe(a):
     if a.min_score is not None:
         rule["min_score"] = int(a.min_score)
     rule["strategy"] = a.strategy
+    rule["slippage_pct"] = float(a.slippage if a.slippage is not None else cfg.get("slippage_pct", 0.0))
+    if a.side:
+        rule["side"] = a.side
     if a.vwap_pct is not None:
         rule["vwap_pct"] = float(a.vwap_pct)
     rows = None
@@ -1321,13 +1412,185 @@ def cmd_universe(a):
     if base:
         sys.stdout.write(render_universe(base, "baseline 1R, no gate, no cutoff, 3 trades"))
     for o in others:
-        print("  %-15s %s" % (o["strategy"] + ":", "gate closed, none taken" if not o["gate_open"] else
-                              "%d signals, %d target, %d stop, %d flat, avg R %+.2f, net %s, ledger %s"
+        print("  %-15s %s" % (o["strategy"] + ":", "%d signals, %d target, %d stop, %d flat, avg R %+.2f, net %s, %s"
                               % (o["breakouts"], o["target"], o["stop"], o["flat"], o["avg_R"] or 0.0,
-                                 rupees(o["net"]), rupees(o["ledger_net"]))))
+                                 rupees(o["net"]), ("ledger " + rupees(o["ledger_net"])) if o["gate_open"]
+                                 else "gate closed: measured, none taken")))
     if a.write:
         print("Wrote %s." % path)
     print(doc["note"])
+    return 0
+
+
+# ---------------------------------------------------------------- many days: the rule and one change at a time
+
+MD_HISTORY = 20          # earlier days a stock's averages look back over
+MD_MIN_HISTORY = 5       # fewer earlier days than this: no average, so not rankable
+MD_LIQUID_N = 174        # the "liquid" set: the top N by average daily turnover on earlier days
+MD_SHORT_GATE = 40.0     # the short side trades days at or under this breadth
+
+
+def md_bundles(folder, first=None, last=None):
+    """Saved whole-universe bundles in a folder, oldest first: [(day, path)]."""
+    out = []
+    for name in sorted(os.listdir(folder)):
+        m = re.match(r"^orb5m-(\d{4}-\d\d-\d\d)\.json(\.gz)?$", name)
+        if m and (not first or m.group(1) >= first) and (not last or m.group(1) <= last):
+            out.append((m.group(1), os.path.join(folder, name)))
+    return out
+
+
+def md_extras(history, n_or=3):
+    """{sym: {"or_vol_avg", "turnover_avg"}} from earlier days only (history: sym -> [(or_vol, turnover)])."""
+    out = {}
+    for sym, h in history.items():
+        h = h[-MD_HISTORY:]
+        if len(h) >= MD_MIN_HISTORY:
+            out[sym] = {"or_vol_avg": sum(x[0] for x in h) / len(h), "turnover_avg": sum(x[1] for x in h) / len(h)}
+    return out
+
+
+def md_variants(rule, only=None):
+    """The rule, then the rule with exactly one thing changed. Names are stable; `only` keeps a subset."""
+    g = rule.get("gate_time") or "10:00"
+    v = [("rule", {}),
+         ("gate off", {"gate_pct": 0.0, "first_entry": g}),       # no gate, entries still from gate_time
+         ("gate 50", {"gate_pct": 50.0}),
+         ("gate 75", {"gate_pct": 75.0}),
+         ("target 1R", {"target_r": 1.0}),
+         ("target 3R", {"target_r": 3.0}),
+         ("cutoff 12:00", {"cutoff": "12:00"}),
+         ("3 trades", {"max_trades": 3}),
+         ("trade on after a loss", {"stop_after_loss": False}),
+         ("no slippage", {"slippage_pct": 0.0}),
+         ("charges <= 15% of risk", {"max_charges_pct_of_risk": 15.0}),
+         ("liquid %d" % MD_LIQUID_N, {"_liquid": True}),
+         ("rel. volume top 20", {"rank": "rvol", "top_n": 20}),
+         ("short below %g%%" % MD_SHORT_GATE, {"side": "short", "gate_pct": MD_SHORT_GATE}),
+         ("vwap", {"strategy": "vwap"})]
+    if only:
+        keep = set(x.strip() for x in only.split(","))
+        v = [x for x in v if x[0] in keep or x[0] == "rule"]
+    return [(name, dict(rule, **change)) for name, change in v]
+
+
+def multiday_replay(days, rule, only=None, progress=None):
+    """Replay every variant on every day, oldest first. Returns {name: {"rule", "days": [{date, breadth,
+    gate_open, ledger, every}]}}. A day's history-based inputs (relative volume, the liquid set) come from earlier
+    days only."""
+    history = {}
+    variants = md_variants(rule, only)
+    out = {name: {"rule": {k: v for k, v in r.items() if not k.startswith("_")}, "days": []} for name, r in variants}
+    for day, path in days:
+        d, sessions = load_universe(path, day)
+        extras = md_extras(history)
+        liquid = sorted((x["turnover_avg"], s) for s, x in extras.items())[-MD_LIQUID_N:]
+        liquid = [s for _, s in liquid]
+        for name, r in variants:
+            rr = dict(r)
+            if rr.pop("_liquid", None):
+                if len(liquid) < MD_LIQUID_N:
+                    continue                          # too little history yet for a liquid set
+                rr["symbols"] = liquid
+            if rr.get("rank") == "rvol" and not extras:
+                continue
+            rec = universe_replay(d, sessions, rr, None, trader_data.CHARGE_RATES, None, extras)
+            out[name]["days"].append({"date": d, "breadth": rec["breadth_pct"], "gate_open": rec["gate_open"],
+                                      "ledger": [{"date": d, "symbol": t["symbol"], "net": t["net"],
+                                                  "risk_inr": t.get("risk_inr"), "why": t["why"]} for t in rec["ledger"]],
+                                      "every": [{"date": d, "net": e["net"], "risk_inr": e.get("risk_inr"), "why": e["why"]}
+                                                for e in rec["every"]]})
+        for sym, bars in sessions.items():
+            history.setdefault(sym, []).append((sum(b["v"] for b in bars[:3]), sum(b["c"] * b["v"] for b in bars)))
+        if progress:
+            progress(d)
+    return out
+
+
+def multiday_summary(result, test_days):
+    """Train = every day but the last `test_days`; test = the last `test_days`. Per variant: the ledger's metrics
+    and the every-signal metrics on the days its gate was open (on the days it would trade)."""
+    all_days = sorted(set(d["date"] for v in result.values() for d in v["days"]))
+    cut = all_days[-test_days] if 0 < test_days < len(all_days) else None
+    rows = {}
+    for name, v in result.items():
+        row = {"rule": v["rule"]}
+        for half in ("train", "test"):
+            ds = [d for d in v["days"] if (cut is None and half == "train") or
+                  (cut is not None and ((d["date"] < cut) if half == "train" else (d["date"] >= cut)))]
+            ledger = [t for d in ds for t in d["ledger"]]
+            every = [e for d in ds if d["gate_open"] for e in d["every"]]
+            row[half] = {"days": len(ds), "open_days": sum(1 for d in ds if d["gate_open"]),
+                         "from": ds[0]["date"] if ds else None, "to": ds[-1]["date"] if ds else None,
+                         "ledger": trader_data.trade_metrics(ledger), "every": trader_data.trade_metrics(every)}
+        rows[name] = row
+    return {"days": len(all_days), "train_to": all_days[all_days.index(cut) - 1] if cut else (all_days[-1] if all_days else None),
+            "test_from": cut, "variants": rows}
+
+
+def render_multiday(s):
+    out = []
+    any_row = next(iter(s["variants"].values()))
+    tr, te = any_row["train"], any_row["test"]
+    out.append("Multi-day replay: %d days. Settings fixed on %s..%s (%d days); scored on %s..%s (%d days)." % (
+        s["days"], tr["from"], tr["to"], tr["days"], te["from"], te["to"], te["days"]))
+    out.append("Each line changes ONE thing from the rule. Every signal: Rs 10,000 each on the days the gate is open. "
+               "Ledger: the Rs 10,000 day, sized to the max loss.")
+    hdr = "  %-24s %-5s %5s %6s %22s %19s %8s   %5s %10s %22s %9s"
+    out.append(hdr % ("variant", "half", "days", "trades", "ledger exp/trade (95%)", "ledger net, R/trade", "max DD",
+                      "open", "signals", "signal exp/trade (95%)", "net R"))
+
+    def ex(m):
+        if not m["n"]:
+            return "-"
+        c = m["expectancy_ci95"]
+        return "%+.1f (%s,%s)" % (m["expectancy"], "%+.0f" % c[0] if c[0] is not None else "-",
+                                   "%+.0f" % c[1] if c[1] is not None else "-")
+    for name, row in s["variants"].items():
+        for half in ("train", "test"):
+            h = row[half]
+            lg, ev = h["ledger"], h["every"]
+            out.append(hdr % (name if half == "train" else "", half, h["days"], lg["n"], ex(lg),
+                              ("%+.0f, %s" % (lg["net"], ("%+.3f" % lg["net_R"]) if lg["net_R"] is not None else "-")) if lg["n"] else "-",
+                              "%.0f" % lg["max_drawdown"], h["open_days"], ev["n"], ex(ev),
+                              ("%+.3f" % ev["net_R"]) if ev["net_R"] is not None else "-"))
+    rule = s["variants"].get("rule")
+    if rule:
+        w = rule["test"]["ledger"]["weekly"]
+        out.append("The rule's held-out weeks: " + (", ".join("%s %+.0f" % kv for kv in w.items()) or "no trades"))
+    out.append("Counts and averages on saved bars with fills at the trigger prices plus slippage. A setting is "
+               "chosen on the train days and only reported on the test days. Not a forecast.")
+    return "\n".join(out) + "\n"
+
+
+def cmd_multiday(a):
+    cfg = {}
+    if a.config and os.path.exists(a.config):
+        with open(a.config, encoding="utf-8") as fh:
+            cfg = json.load(fh)
+    rule = dict(U_DEFAULTS)
+    rule["gate_pct"] = float(cfg.get("breadth_gate_pct") or 0) or U_DEFAULTS["gate_pct"]
+    rule["gate_time"] = cfg.get("gate_time") or U_DEFAULTS["gate_time"]
+    rule["budget"] = float(cfg.get("budget") or U_DEFAULTS["budget"])
+    rule["max_trades"] = int(cfg.get("max_trades_per_day") or U_DEFAULTS["max_trades"])
+    rule["stop_after_loss"] = bool(cfg.get("stop_after_loss", True))
+    rule["slippage_pct"] = float(a.slippage if a.slippage is not None else cfg.get("slippage_pct", 0.05))
+    rule["strategy"] = "orb"
+    days = md_bundles(a.dir, a.first, a.last)
+    if len(days) < 2:
+        raise TMError("need at least 2 saved days in %s (scan.py orb --save trader/replays/orb5m-DATE.json.gz)" % a.dir)
+    prog = None if a.json else (lambda d: sys.stderr.write("  replayed %s\n" % d))
+    res = multiday_replay(days, rule, a.only, prog)
+    s = multiday_summary(res, a.test)
+    if a.write:
+        _write(a.write, s)
+    if a.json:
+        print(json.dumps(s, indent=2))
+    else:
+        sys.stdout.write(render_multiday(s))
+        r = s["variants"]["rule"]["test"]["ledger"]
+        print("Go/no-go, replay half: %s." % ("PASS, held-out expectancy above zero" if r["n"] and r["expectancy"] > 0
+                                             else "NOT MET, held-out expectancy %s" % (r["expectancy"] if r["n"] else "n/a (no trades)")))
     return 0
 
 
@@ -1387,12 +1650,25 @@ def main(argv=None):
     p.add_argument("--keep-every", action="store_true", help="keep every breakout's row in the written file")
     p.add_argument("--write", nargs="?", const=True, metavar="PATH", help="save (default trader/replays/DATE.json)")
     p.add_argument("--json", action="store_true")
+    p.add_argument("--slippage", type=float, help="percent per side on every market fill (default: config slippage_pct, else 0)")
+    p.add_argument("--side", choices=["long", "short"], help="orb only: short trades the first close under the range")
+
+    p = sub.add_parser("multiday", help="the rule and one change at a time over every saved day; train, then test")
+    p.add_argument("--dir", default=os.path.join("trader", "replays"), help="the folder of orb5m-DATE.json.gz bundles")
+    p.add_argument("--from", dest="first", help="first day, YYYY-MM-DD")
+    p.add_argument("--to", dest="last", help="last day, YYYY-MM-DD")
+    p.add_argument("--test", type=int, default=20, help="the last N days are held out and only scored (default 20)")
+    p.add_argument("--only", help="comma-separated variant names to run beside the rule")
+    p.add_argument("--slippage", type=float, help="percent per side (default: config slippage_pct, else 0.05)")
+    p.add_argument("--config", default="trader/config.json")
+    p.add_argument("--write", metavar="PATH", help="save the summary as JSON")
+    p.add_argument("--json", action="store_true")
     a = ap.parse_args(argv)
     if not a.cmd:
         ap.print_help()
         return 1
     try:
-        return {"run": cmd_run, "chart": cmd_chart, "universe": cmd_universe}[a.cmd](a)
+        return {"run": cmd_run, "chart": cmd_chart, "universe": cmd_universe, "multiday": cmd_multiday}[a.cmd](a)
     except TMError as e:
         print("timemachine.py: %s" % e, file=sys.stderr)
         return 1

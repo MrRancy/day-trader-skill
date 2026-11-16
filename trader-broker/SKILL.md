@@ -103,12 +103,14 @@ broker squares it off from about 15:20 if the user has not.
 
 `trader/paper.json` starts from the config budget on the first `place`.
 
-- A MARKET order fills at the quoted last price: `--price`, else a fresh
-  entry in `trader/prices.json`, else a live INDstocks quote (read only). A
-  LIMIT buy fills when the price is at or under the limit, else waits.
+- A MARKET order fills at the quoted last price plus `slippage_pct` (0.05 %
+  a side in the paper config, onto the tick, against you): `--price`, else a
+  fresh entry in `trader/prices.json`, else a live INDstocks quote (read
+  only). A LIMIT buy fills at the price when it is at or under the limit.
 - The stop-loss and target legs wait until `paper tick` sees a price through
-  a trigger: the stop-loss fills at its trigger, the target at its trigger,
-  and the other leg is cancelled. A tick is one price per symbol, so it is a
+  a trigger. The stop-loss is a market order once touched: at its trigger,
+  or at the price already through it, less the slippage. The target is a
+  limit at its trigger. The other leg is cancelled. A tick is one price per symbol, so it is a
   snapshot: run it after each 5-minute bar, or with the bar's low and high
   in two ticks when a bar touched both.
 - After 15:20 a tick squares off every open INTRADAY position at the price
@@ -116,8 +118,9 @@ broker squares it off from about 15:20 if the user has not.
 - Every fill pays the real charges (`trader_data.charges_leg`): brokerage,
   STT on the sell, exchange, SEBI, IPFT, stamp duty on the buy, GST. The
   ledger and `trader/portfolio.json` both carry cash net of charges.
-- A paper fill at the last price is kinder than a real one: no slippage, no
-  partial fills, no gap through the stop. Say so when the user reads it.
+- A paper fill is still kinder than a real one: a fixed slippage, no
+  partial fills, and a tick sees one price, not the bar's path. Say so when
+  the user reads it.
 
 ## Steps: the entry
 

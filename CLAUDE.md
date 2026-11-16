@@ -157,8 +157,32 @@ The skills are installed as directory junctions under .claude/skills
        baseline, --write trader/replays/DATE.json.
     d. trader-budget/paper.example.json: the paper-month config. The paper
        ledger's sells now carry pnl and avg_cost.
-    Rule for the month: counts only, no win rates; the evening replay must
-    beat its baseline before any setting is called good.
+    Rule for the month: no win-rate language; the evening replay must
+    beat its baseline before any setting is called good. (Superseded
+    2026-11-16 by step 12's metrics and go/no-go.)
+12. Evidence before money (decided 2026-11-16, after 28 whole-universe days
+    showed no stop/target/exit shape with a positive net per trade):
+    a. timemachine.py multiday over every saved bundle: the rule plus one
+       change at a time; the last 20 days held out (settings fixed on the
+       days before, only scored on these). History-based inputs (relative
+       volume, the liquid 174 by turnover) from earlier days only.
+    b. Gate the trading, not the measurement: universe scores every signal
+       on gate-closed days too; only the ledger stays empty.
+    c. Honest fills: slippage_pct (0.05 a side) on every market fill in the
+       replay and the paper ledger; a stop gapped through fills at the open.
+    d. trader-risk: max_charges_pct_of_risk (15) blocks a trade whose
+       round-trip charges are over that share of the rupee risk.
+    e. review: net R a trade, expectancy with a 95 % range, profit factor,
+       max drawdown, weekly net (trader_data.trade_metrics).
+    f. GO/NO-GO: no real money until net expectancy is above zero on the
+       held-out replay days AND over at least 200 paper trades.
+    g. Test selection (liquid set, relative volume, a short side on weak
+       days) before more entry rules. VWAP's positive gross on Nov 11 is a
+       lead only.
+    h. Automate the morning: INDstocks POST /generate/token (x-api-key =
+       client id, mpin, totp; one live token, 1 a minute) from
+       INDSTOCKS_CLIENT_ID, INDSTOCKS_MPIN, INDSTOCKS_TOTP_SECRET in .env;
+       the token stays in memory, never on disk.
 
 ## Rules
 

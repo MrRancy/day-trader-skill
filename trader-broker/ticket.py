@@ -52,6 +52,7 @@ import argparse
 import datetime
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -504,6 +505,9 @@ class Paper(object):
         self.path = path
         self.cfg = cfg or {}
         self.rates = rates_of(cfg)
+        # slippage, percent a side, on every market fill (a MARKET entry, a stop-loss leg, the square-off);
+        # limit fills (a LIMIT entry, the target leg) fill at their price
+        self.slip = float(_f(self.cfg.get("slippage_pct")) or 0.0) / 100.0
         self.doc = read_json(path, "paper ledger", required=False)
         if self.doc is None:
             budget = _f(self.cfg.get("budget"))
@@ -519,6 +523,14 @@ class Paper(object):
     def _id(self, prefix):
         self.doc["seq"] = int(self.doc.get("seq", 0)) + 1
         return "PAPER-%s-%d" % (prefix, self.doc["seq"])
+
+    def slipped(self, price, side):
+        """A market fill moved against you by the slippage, onto the 0.05 tick (up for a buy, down for a sell)."""
+        if not self.slip:
+            return round(price, 2)
+        x = price * (1 + self.slip) if side == "BUY" else price * (1 - self.slip)
+        n = math.ceil(round(x / 0.05, 6)) if side == "BUY" else math.floor(round(x / 0.05, 6))
+        return round(n * 0.05, 2)
 
     def position(self, sym):
         return self.doc["positions"].get(sym.upper())
@@ -603,13 +615,14 @@ class Paper(object):
         limit = _f(order.get("limit_price"))
         fill_at = None
         if typ == "MARKET":
-            fill_at = ltp
+            fill_at = self.slipped(ltp, side)
         elif side == "BUY" and ltp <= limit + 1e-9:
             fill_at = ltp
         elif side == "SELL" and ltp >= limit - 1e-9:
             fill_at = ltp
         if fill_at is not None:
-            events.append(self._fill(parent, qty, round(fill_at, 2), now, "filled at the quoted price"))
+            events.append(self._fill(parent, qty, round(fill_at, 2), now, "filled at the quoted price" if fill_at == ltp
+                                     else "filled at the quoted price %s plus slippage" % _p(ltp)))
         else:
             events.append({"id": parent["id"], "symbol": sym, "txn_type": side, "qty": qty, "price": None,
                            "what": "pending: the last price %s is %s the limit %s" % (
@@ -643,12 +656,15 @@ class Paper(object):
                 sl, tg = rec.get("sl_trigger_price"), rec.get("tgt_trigger_price")
                 hit = None
                 if sl and ((long and p <= sl + 1e-9) or (not long and p >= sl - 1e-9)):
-                    hit, at = "stop-loss", sl
+                    # a stop becomes a market order: a price already through it fills there, not at the trigger
+                    hit, at = "stop-loss", self.slipped(min(p, sl) if long else max(p, sl), rec["txn_type"])
                 elif tg and ((long and p >= tg - 1e-9) or (not long and p <= tg + 1e-9)):
                     hit, at = "target", tg
                 if hit:
                     rec["leg"] = hit
-                    events.append(self._fill(rec, qty, round(at, 2), now, "%s leg filled at its trigger (last %s)" % (hit, _p(p))))
+                    events.append(self._fill(rec, qty, round(at, 2), now, (
+                        "%s leg filled at its trigger (last %s)" % (hit, _p(p))) if at in (sl, tg) else
+                        "%s leg filled through its trigger %s (last %s)" % (hit, _p(sl), _p(p))))
             elif p is not None:
                 limit = rec.get("requested_price")
                 side = rec["txn_type"]
@@ -667,7 +683,7 @@ class Paper(object):
                        "txn_type": "SELL", "product": "INTRADAY", "order_type": "MARKET", "validity": "DAY",
                        "requested_qty": pos["qty"], "requested_price": None, "status": "PENDING", "remarks": "MIS square-off"}
                 self.doc["orders"].append(rec)
-                events.append(self._fill(rec, pos["qty"], round(p, 2), now, "MIS square-off by the broker at the quoted price"))
+                events.append(self._fill(rec, pos["qty"], self.slipped(p, "SELL"), now, "MIS square-off by the broker at the quoted price"))
         if t >= CLOSE:
             for rec in self.doc["orders"]:
                 if rec["status"] == "PENDING":
