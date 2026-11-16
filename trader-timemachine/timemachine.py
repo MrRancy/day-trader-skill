@@ -1550,7 +1550,8 @@ def render_multiday(s):
         s["days"], tr["from"], tr["to"], tr["days"], te["from"], te["to"], te["days"]))
     out.append("Each line changes ONE thing from the rule. Every signal: Rs 10,000 each on the days the gate is open. "
                "Ledger: the Rs 10,000 day, sized to the max loss.")
-    hdr = "  %-24s %-5s %5s %6s %22s %19s %8s   %5s %10s %22s %9s"
+    wide = max([24] + [len(n) for n in s["variants"]])
+    hdr = "  %-" + str(wide) + "s %-5s %5s %6s %22s %19s %8s   %5s %10s %22s %9s"
     out.append(hdr % ("variant", "half", "days", "trades", "ledger exp/trade (95%)", "ledger net, R/trade", "max DD",
                       "open", "signals", "signal exp/trade (95%)", "net R"))
 

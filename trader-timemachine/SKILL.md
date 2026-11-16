@@ -176,6 +176,12 @@ each, on the days the gate is open): trades, expectancy a trade with its
 held-out weeks and the replay half of the go/no-go (held-out expectancy
 above zero). `--write` saves the summary that `check.py review` reads.
 
+`--base NAME` moves the starting point to one variant and stacks one more
+change on it at a time ("short below 40% + liquid 174"). On a short base
+the gate lines become the short gate's own levels (below 30 %, below 50 %,
+no gate) and VWAP drops out (long only). Each layer looks at the held-out
+days again, so the further you stack, the less "held out" they are.
+
 Fills are honest by default: 0.05 % slippage a side on every market fill
 (`slippage_pct` in the config, `--slippage`), a stop that a later bar opens
 through fills at that open, a target is a resting limit at its price.

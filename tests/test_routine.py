@@ -183,6 +183,22 @@ class UniverseReplay(unittest.TestCase):
         self.assertEqual(s["variants"]["rule"]["test"]["ledger"]["n"], 0)
         self.assertIn("scored on 2026-11-07..2026-11-08 (2 days)", tm.render_multiday(s))
 
+    def test_multiday_base_stacks_one_more_change(self):
+        rule = dict(tm.U_DEFAULTS)
+        v = dict(tm.md_variants(rule, base="short below 40%"))
+        self.assertEqual(list(v)[:5], ["rule", "short below 40%", "short below 40% + below 30%",
+                                       "short below 40% + below 50%", "short below 40% + gate off"])
+        self.assertEqual(v["rule"].get("side"), None)
+        self.assertEqual((v["short below 40% + below 30%"]["side"], v["short below 40% + below 30%"]["gate_pct"]), ("short", 30.0))
+        self.assertEqual((v["short below 40% + target 3R"]["gate_pct"], v["short below 40% + target 3R"]["target_r"]), (40.0, 3.0))
+        self.assertNotIn("short below 40% + vwap", v)                      # vwap is long only
+        self.assertNotIn("short below 40% + short below 40%", v)
+        self.assertEqual(list(dict(tm.md_variants(rule, "short below 40% + liquid 174", base="short below 40%"))),
+                         ["rule", "short below 40%", "short below 40% + liquid 174"])
+        self.assertEqual(dict(tm.md_variants(rule, base="target 3R"))["target 3R + cutoff 12:00"]["cutoff"], "12:00")
+        with self.assertRaises(tm.TMError):
+            tm.md_variants(rule, base="nonsense")
+
     def test_the_other_strategies_on_174_charts(self):
         day, sessions = tm.load_universe(ORB)
         rows = tm.trader_data.parse_instruments(tm.trader_data.read_text(MASTER))
