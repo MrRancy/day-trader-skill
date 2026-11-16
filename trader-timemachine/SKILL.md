@@ -172,7 +172,7 @@ The last `--test` days (20) are held out: settings are chosen on the days
 before them and only scored on the held-out days. Per half it prints the
 ledger (the Rs 10,000 day sized to the max loss) and every signal (Rs 10,000
 each, on the days the gate is open): trades, expectancy a trade with its
-95 % range, net R a trade, profit factor and max drawdown, then the rule's
+95 % range, net R a trade, rupees won over rupees lost and max drawdown, then the rule's
 held-out weeks and the replay half of the go/no-go (held-out expectancy
 above zero). `--write` saves the summary that `check.py review` reads.
 

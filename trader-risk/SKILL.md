@@ -144,8 +144,8 @@ rupee risk (`paper_trades`), and the replay's ledger trades with theirs.
 `review` rolls the journals up over the last N days: trades and net, the
 gate's open days, the replay's rule against its baseline, results by symbol,
 then the metrics for the paper trades and for the replay rule's ledger: net
-R a trade, expectancy (net rupees a trade) with its 95 % range, profit
-factor, max drawdown and net by week.
+R a trade, expectancy (net rupees a trade) with its 95 % range, rupees won
+over rupees lost, max drawdown and net by week.
 
 The last line is the go/no-go, decided 2026-11-16, before any real money:
 net expectancy above zero on the held-out replay days (`timemachine.py
