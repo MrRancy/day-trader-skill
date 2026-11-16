@@ -147,6 +147,7 @@ def state(now, cfg):
     s["journal"] = os.path.exists(os.path.join(FILES["journal"], "%s.json" % today))
     s["max_trades"] = int(cfg_value(cfg, "max_trades_per_day", 2))
     s["stop_after_loss"] = bool(cfg_value(cfg, "stop_after_loss", False))
+    s["paused"] = cfg_value(cfg, "entries_paused", None)
     return s
 
 
@@ -172,6 +173,9 @@ def next_step(s):
             return "%s is open on the paper ledger." % sym, "day.py watch (every few minutes, or /loop 5m)"
         if ph == "flat by":
             return "%s is still open at flat-by." % sym, "ticket.py flatten --symbol %s, then check.py and your yes" % sym
+    if ph in ("entry window", "holding window") and s.get("paused"):
+        return "Paper entries are paused (%s): the gate and the scan are recorded, nothing is taken." % s["paused"], \
+            "day.py evening after 15:30 (it saves the bars the registered tests need)"
     if ph in ("entry window", "holding window"):
         if s["stop_after_loss"] and lost:
             return "A loss closed the day (%s)." % ", ".join(c["symbol"] for c in lost), "day.py evening after 15:30"
@@ -317,6 +321,10 @@ def cmd_gate(a, now, cfg):
         return 1
     run_step("the opening-range scan", [script("scanner"), "orb", "--show", str(a.show)] + stamp + off
              + (["--daily", a.daily] if a.daily else []), False)
+    if cfg_value(cfg, "entries_paused", None):
+        print("Gate open, but paper entries are paused (%s): recorded for the journal, nothing to pick."
+              % cfg_value(cfg, "entries_paused", None))
+        return 0
     print("Gate open. Pick ONE chart: entry.py check SYMBOL --setup orb, then exit, timemachine, budget, risk, "
           "and the ticket waits for the user's yes.")
     return 0

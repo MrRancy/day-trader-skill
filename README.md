@@ -224,7 +224,12 @@ last intraday tests are written down in
 `trader-timemachine/registered.json` (a short side on days at or under 30 %
 breadth, only stocks INDstocks allows intraday; and the top 20 by relative
 volume with no gate) and are scored only on sessions saved from 2026-11-17,
-every evening, by `timemachine.py registered`.
+every evening, by `timemachine.py registered`. Each verdict is taken at the
+first evening that qualifies and stored; it never moves after. The
+intraday-allowed list is a can-short list, not a liquidity screen (2,298
+names, about the whole universe); the turnover slippage is what charges the
+thin ones. Paper entries are paused (`entries_paused` in the config) while
+these run: paper restarts only on a test that passes.
 
 The routine runs itself on weekdays once `python3 trader-day/day.py schedule
 install` has set up the morning, gate and evening tasks (Windows Task

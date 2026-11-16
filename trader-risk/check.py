@@ -83,6 +83,8 @@ DEFAULTS = {
     "max_charges_pct_of_risk": None,
     # the same check, logged instead of blocking: a warning names what the cap would have blocked
     "warn_charges_pct_of_risk": None,
+    # a pause: any text here blocks every entry (exits still pass) and says why
+    "entries_paused": None,
 }
 # the fields INDstocks reads (POST /order and POST /smart/order); the fingerprint covers these only
 INDSTOCKS_FIELDS = ("security_id", "exchange", "segment", "product", "txn_type", "order_type", "validity",
@@ -503,6 +505,9 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
             later.append("price: no price for %s to size a %s-share order; add it to "
                          "trader/prices.json (trader-alerts: alerts.py quote %s --write)" % (sym, qty, sym))
 
+        # paused: no entries at all while the config says so
+        if c.get("entries_paused"):
+            later.append("paused: paper entries are paused (entries_paused: %s)" % c["entries_paused"])
         # blocked list and size
         if sym in blocked:
             later.append("blocked: %s is on your blocked list" % sym)

@@ -59,6 +59,15 @@ class TheStateMachine(Scratch):
         self.assertEqual(day.phase_of(day.now_ist("2026-11-06 10:30"), {"gate_time": "10:30"}), "entry window")
         self.assertEqual(day.phase_of(day.now_ist("2026-11-06 10:29"), {"gate_time": "10:30"}), "early session")
 
+    def test_paused_entries(self):
+        with open("trader/universe.txt", "w") as fh:
+            fh.write("RELIANCE|Reliance Industries Ltd\n")
+        cfg = dict(CFG, entries_paused="the long ORB is retired")
+        what, cmd = day.next_step(day.state(day.now_ist("2026-11-06 10:05"), cfg))
+        self.assertEqual(what, "Paper entries are paused (the long ORB is retired): the gate and the scan are "
+                               "recorded, nothing is taken.")
+        self.assertTrue(cmd.startswith("day.py evening after 15:30"))
+
     def test_a_closed_day_and_the_morning(self):
         what, cmd = self.nxt("2026-11-08 10:00")                     # Sunday
         self.assertTrue(what.startswith("No session today"))

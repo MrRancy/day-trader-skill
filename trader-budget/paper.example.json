@@ -24,6 +24,7 @@
   "stop_limit_buffer_pct": 0.25,
   "broker": "indstocks",
   "paper": true,
+  "entries_paused": "the long opening-range breakout is retired (2026-11-17); paper restarts only on a registered test that passes",
   "paper_start": "2026-11-13",
   "blocked": [],
   "allow_fno": false,

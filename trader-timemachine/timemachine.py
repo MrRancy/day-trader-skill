@@ -1632,6 +1632,15 @@ def multiday_summary(result, test_days):
             "test_from": cut, "chosen": chosen, "variants": rows}
 
 
+def seal(s):
+    """Blank the test half of every sealed variant, so the written file and --json hold no more than the screen."""
+    for row in s["variants"].values():
+        if row.get("sealed"):
+            row["test"] = {"sealed": True}
+            row["cost_flagged"] = {"train": row["cost_flagged"]["train"]}
+    return s
+
+
 def render_multiday(s):
     out = []
     any_row = next(iter(s["variants"].values()))
@@ -1655,10 +1664,10 @@ def render_multiday(s):
     for name, row in s["variants"].items():
         for half in ("train", "test"):
             h = row[half]
-            lg, ev = h["ledger"], h["every"]
-            if half == "test" and row.get("sealed") and not unseal:
+            if half == "test" and row.get("sealed") and (not unseal or h.get("sealed")):
                 out.append("  %-*s %-5s %s" % (wide, "", half, "sealed: not chosen on the train days"))
                 continue
+            lg, ev = h["ledger"], h["every"]
             out.append(hdr % ((name + (" *" if name == s.get("chosen") else "")) if half == "train" else "", half,
                               h["days"], lg["n"], ex(lg),
                               ("%+.0f, %s" % (lg["net"], ("%+.3f" % lg["net_R"]) if lg["net_R"] is not None else "-")) if lg["n"] else "-",
@@ -1699,6 +1708,8 @@ def cmd_multiday(a):
     res = multiday_replay(days, rule, a.only, prog, a.base)
     s = multiday_summary(res, a.test)
     s["unsealed"] = bool(a.unseal)
+    if not a.unseal:
+        seal(s)
     if a.write:
         _write(a.write, s)
     if a.json:
@@ -1739,10 +1750,41 @@ def registered_verdict(reg, every_days, every):
     return "FAIL", "by-day 95%% range %s to %s a signal: the low end is not above zero" % tuple(every["expectancy_ci95_by_day"])
 
 
+def registered_score(reg, v, scored):
+    """One test's (state, why, sessions judged on, every, ledger). The verdict is taken at the FIRST evening that
+    qualifies (days_needed sessions and min_signal_days signal days), on the sessions up to it, and never moves
+    after; INCONCLUSIVE at give_up_after sessions without qualifying; "too early" before either."""
+    by_date = dict((d["date"], d) for d in v["days"])
+    cut = None
+    for k in range(1, len(scored) + 1):
+        open_days = [by_date[x] for x in scored[:k] if x in by_date and by_date[x]["gate_open"]]
+        sig_days = sum(1 for d in open_days if d["every"])
+        if k >= reg["days_needed"] and sig_days >= reg["min_signal_days"]:
+            cut = k
+            break
+        if k >= reg["give_up_after"]:
+            cut = k
+            break
+    upto = scored[:cut] if cut else scored
+    days = [by_date[x] for x in upto if x in by_date]
+    every = trader_data.trade_metrics([e for d in days if d["gate_open"] for e in d["every"]])
+    ledger = trader_data.trade_metrics([t for d in days for t in d["ledger"]])
+    state, why = registered_verdict(reg, len(upto), every)
+    return state, why, upto, every, ledger
+
+
 def cmd_registered(a):
     path = a.registration or REGISTERED
-    with open(path, encoding="utf-8") as fh:
-        reg = json.load(fh)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            reg = json.load(fh)
+    except (OSError, ValueError) as e:
+        raise TMError("cannot read the registration %s: %s" % (path, e))
+    vpath = os.path.splitext(path)[0] + "-verdicts.json"
+    frozen = {}
+    if os.path.exists(vpath):
+        with open(vpath, encoding="utf-8") as fh:
+            frozen = json.load(fh)
     days = md_bundles(a.dir)
     first = next((i for i, (d, _) in enumerate(days) if d >= reg["score_from"]), len(days))
     days = days[max(0, first - MD_HISTORY):]             # the earlier days only feed the history averages
@@ -1757,13 +1799,26 @@ def cmd_registered(a):
                               score_from=reg["score_from"])
     else:
         res = {name: {"days": []} for name, _ in registered_variants(reg, os.path.dirname(path))}
+    changed = False
     for name, v in res.items():
-        every = trader_data.trade_metrics([e for d in v["days"] if d["gate_open"] for e in d["every"]])
-        ledger = trader_data.trade_metrics([t for d in v["days"] for t in d["ledger"]])
-        state, why = registered_verdict(reg, len(scored), every)
-        result["tests"][name] = {"state": state, "why": why, "open_days": sum(1 for d in v["days"] if d["gate_open"]),
-                                 "every": every, "ledger": ledger}
-        out.append("  %s: %s (%s)" % (name, state, why))
+        state, why, upto, every, ledger = registered_score(reg, v, scored)
+        row = {"state": state, "why": why, "sessions": len(upto), "through": upto[-1] if upto else None,
+               "open_days": sum(1 for d in v["days"] if d["gate_open"] and d["date"] in upto),
+               "every": every, "ledger": ledger}
+        if name in frozen:                       # a verdict, once reached, is read back, never recomputed
+            if (frozen[name]["state"], frozen[name]["through"]) != (state, row["through"]):
+                out.append("  WARNING: %s now scores %s through %s; the frozen verdict stands (the saved bars may "
+                           "have changed)" % (name, state, row["through"]))
+            row = frozen[name]
+            state, why = row["state"], row["why"]
+            every, ledger = row["every"], row["ledger"]
+        elif state != "too early":
+            row["frozen_on"] = trader_data.now_ist().strftime("%Y-%m-%d %H:%M")
+            frozen[name] = row
+            changed = True
+        result["tests"][name] = row
+        out.append("  %s: %s (%s)%s" % (name, state, why, ("; frozen on %s, through %s" % (row["frozen_on"], row["through"]))
+                                         if row.get("frozen_on") else ""))
         if every["n"]:
             c = every["expectancy_ci95_by_day"]
             out.append("    every signal: %d on %d days, %+.1f a signal (by-day 95%% %s to %s); ledger %s"
@@ -1771,6 +1826,8 @@ def cmd_registered(a):
                           "%+.1f" % c[0] if c[0] is not None else "-", "%+.1f" % c[1] if c[1] is not None else "-",
                           ("%d trades, net %+.0f" % (ledger["n"], ledger["net"])) if ledger["n"] else "no trades"))
     out.append("Counts on saved bars after charges and slippage. Not a forecast.")
+    if changed:
+        _write(vpath, frozen)
     if a.write:
         _write(a.write, result)
     print(json.dumps(result, indent=2) if a.json else "\n".join(out))

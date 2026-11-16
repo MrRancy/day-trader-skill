@@ -176,12 +176,14 @@ The last `--test` days (20) are held out. The tool chooses on the days
 before them (the best train every-signal expectancy among the settings with
 100 or more signals; not the rule, not "no slippage") and shows the held-out
 half only for the rule and that choice, marked `*`; every other test half
-prints "sealed". `--unseal` shows them all, with a warning: picking the best
-of 15 on the held-out days is choosing on them. Per half it prints the
+prints "sealed", and the written file (`--write`) and `--json` blank them too
+(`"test": {"sealed": true}`). `--unseal` shows and writes them all, with a
+warning: picking the best of 15 on the held-out days is choosing on them. Per half it prints the
 ledger (the Rs 10,000 day sized to the max loss) and every signal (Rs 10,000
 each, on the days the gate is open): trades, expectancy a trade with its
 95 % range (by trade for the ledger, by day for the signals: one total per
-day, because a day's signals rise and fall together), net R a trade, rupees
+day, because a day's signals rise and fall together, with a Student-t
+multiplier on days - 1 degrees of freedom, 2.26 at 10 days, not 1.96), net R a trade, rupees
 won over rupees lost and max drawdown, how many of the rule's signals the
 logged cost check would have blocked, the rule's held-out weeks and the
 replay half of the go/no-go (10 or more signal days, the low end of the
@@ -215,14 +217,20 @@ python3 "${CLAUDE_SKILL_DIR}/timemachine.py" registered
 2026-11-17 before the first session they are scored on, with the frozen
 paper rule and the pass rule: a short side on days at or under 30 %
 breadth, only the 2,298 stocks INDstocks allows intraday
-(`shortable-2026-11-17.txt`, INTRADAY_LEVERAGE above 1); and the top 20 by
+(`shortable-2026-11-17.txt`, INTRADAY_LEVERAGE above 1: a can-short list, not a
+liquidity screen; it is about the size of the whole scan universe, and the
+turnover slippage is what charges the thin names); and the top 20 by
 relative volume, long, no gate, entries from 09:35. They are scored only on
 sessions saved from `score_from`, every signal with by-day ranges. Verdict at
 the first evening with 20 sessions scored and signals on 10 days: PASS when
 the low end of the by-day 95 % range is above zero, else FAIL; INCONCLUSIVE
-after 60 sessions without 10 signal days. The evening step runs it. Do not
-edit the file to rescue a test; a new idea gets a new registration and new
-days.
+after 60 sessions without 10 signal days. The verdict is taken on the
+sessions up to that first qualifying evening and stored in
+`registered-verdicts.json`; later runs read it back and never re-score it, so
+a FAIL on session 20 cannot turn into a PASS on session 27 (a later run that
+scores differently prints a WARNING and the stored verdict stands). The
+evening step runs it. Do not edit the files to rescue a test; a new idea
+gets a new registration and new days.
 `universe` takes the same `--slippage` and `--side short`, and on a
 gate-closed day it now measures every breakout ("measured, not taken") so
 the journal records what the gate kept you out of; only the ledger is empty.

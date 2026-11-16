@@ -558,9 +558,12 @@ class EvidenceRules(unittest.TestCase):
                   {"date": "2026-11-04", "net": -20}, {"date": "2026-11-04", "net": -18},
                   {"date": "2026-11-05", "net": 5}]
         m = tm.trader_data.trade_metrics(trades)
-        # day totals 22, -38, 5 around a mean of -2.2 a trade: sqrt(1877.76 * 3/2) / 5 * 1.96 = 20.8
+        # day totals 22, -38, 5 around a mean of -2.2 a trade: sqrt(1877.76 * 3/2) / 5 = 10.61, times the
+        # Student-t 4.303 for 2 degrees of freedom (3 days) = 45.67, not 1.96
         self.assertEqual((m["expectancy"], m["expectancy_ci95"], m["days"], m["expectancy_ci95_by_day"]),
-                         (-2.2, [-15.84, 11.44], 3, [-23.0, 18.6]))
+                         (-2.2, [-15.84, 11.44], 3, [-47.87, 43.47]))
+        t95 = tm.trader_data.t95
+        self.assertEqual((t95(1), t95(9), t95(10), t95(35), t95(200)), (12.706, 2.262, 2.228, 2.042, 1.96))
         one = tm.trader_data.trade_metrics(trades[:2])
         self.assertEqual((one["days"], one["expectancy_ci95_by_day"]), (1, [None, None]))
 
@@ -607,6 +610,19 @@ class EvidenceRules(unittest.TestCase):
         self.assertEqual(s["variants"]["gate off"]["cost_flagged"], {"train": 0, "test": 0})   # no warn cap set
         s["unsealed"] = True
         self.assertIn("UNSEALED", tm.render_multiday(s))
+        # the written file and --json hold no more than the screen: sealed test halves are blanked
+        s["unsealed"] = False
+        tm.seal(s)
+        self.assertEqual(s["variants"]["target 3R"]["test"], {"sealed": True})
+        self.assertIn("every", s["variants"]["gate off"]["test"])
+        self.assertEqual(tm.render_multiday(s).count("sealed: not chosen on the train days"), 2)
+        code, out, err = run(tm, ["multiday", "--dir", folder, "--test", "2", "--only", "gate off,target 3R",
+                                  "--config", os.path.join(folder, "none.json"), "--json"])
+        doc = json.loads(out)
+        self.assertEqual(doc["variants"]["target 3R"]["test"], {"sealed": True})
+        code, out, err = run(tm, ["multiday", "--dir", folder, "--test", "2", "--only", "gate off,target 3R",
+                                  "--config", os.path.join(folder, "none.json"), "--json", "--unseal"])
+        self.assertIn("every", json.loads(out)["variants"]["target 3R"]["test"])
 
     def test_registration(self):
         with open(tm.REGISTERED, encoding="utf-8") as fh:
@@ -648,8 +664,35 @@ class EvidenceRules(unittest.TestCase):
         doc = json.loads(out)
         self.assertEqual(doc["sessions"], ["2026-11-08", "2026-11-09"])   # Nov 3-7 feed the history only
         t = doc["tests"]["gate off"]
-        self.assertEqual((t["every"]["n"], t["every"]["days"]), (150, 2))
+        self.assertEqual((t["every"]["n"], t["every"]["days"], t["through"]), (150, 2, "2026-11-09"))
         self.assertEqual(t["state"], "FAIL")
+        with open(os.path.join(folder, "reg-verdicts.json")) as fh:
+            self.assertEqual(json.load(fh)["gate off"]["through"], "2026-11-09")
+        # a later session does not move a verdict: it stays the one taken at the first qualifying evening
+        doc = dict(src, bars={s: [dict(b, ts=b["ts"] + 86400 * 7) for b in bars] for s, bars in src["bars"].items()})
+        with gz.open(os.path.join(folder, "orb5m-2026-11-10.json.gz"), "wt") as fh:
+            json.dump(doc, fh)
+        code, out, err = run(tm, ["registered", "--dir", folder, "--registration", path])
+        self.assertIn("gate off: FAIL", out)
+        self.assertIn("through 2026-11-09", out)
+        # and the score itself cuts at the first qualifying evening, even when recomputed
+        res = {"gate off": {"days": [{"date": d, "gate_open": True, "ledger": [],
+                                      "every": [{"date": d, "net": n, "risk_inr": 100.0, "why": "x"}]}
+                                     for d, n in (("2026-11-08", -5.0), ("2026-11-09", -6.0), ("2026-11-10", 99.0))]}}
+        state, why, upto, every, ledger = tm.registered_score(reg, res["gate off"], ["2026-11-08", "2026-11-09", "2026-11-10"])
+        self.assertEqual((state, upto, every["n"]), ("FAIL", ["2026-11-08", "2026-11-09"], 2))
+
+    def test_paused_entries(self):
+        with open(ORDERS) as fh:
+            orders = json.load(fh)["orders"]
+        opened = {"date": "2026-11-03", "time": "10:00", "pct": 71.9, "open": True, "reason": "open"}
+        cfg = {"budget": 100000, "entries_paused": "the long ORB is retired"}
+        res = check.check(orders, cfg, now=at("10:01"), breadth=opened)
+        self.assertEqual(res["block"], 1)
+        self.assertIn("paused: paper entries are paused (entries_paused: the long ORB is retired)",
+                      [r for x in res["results"] for r in x["reasons"]])
+        with open(os.path.join(os.path.dirname(FIX), "..", "trader-budget", "paper.example.json")) as fh:
+            self.assertIn("retired", json.load(fh)["entries_paused"])
 
 
 if __name__ == "__main__":

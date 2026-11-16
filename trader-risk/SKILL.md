@@ -125,6 +125,11 @@ in trader-budget turns them on):
   At Rs 10,000 a trade the charges are about Rs 27, so a 15 % cap needs
   about Rs 180 at risk: a stop of 2.4 % on a Rs 7,500 position. Tight stops
   on a small account are mostly charges.
+- `entries_paused`: any text blocks every entry with "paused: paper entries
+  are paused (entries_paused: ...)"; exits still pass. Set in the paper
+  config on 2026-11-17: the long opening-range breakout is retired, so 200
+  paper trades of it would prove nothing. Paper restarts only on a
+  registered test that passes (trader-timemachine, "The registered tests").
 - `warn_charges_pct_of_risk` (15 in the paper config): the same check, logged
   instead of blocking ("cost (logged, not blocking): ... would have blocked
   it"). The paper config uses this one and leaves `max_charges_pct_of_risk`
@@ -157,7 +162,8 @@ over rupees lost, max drawdown and net by week.
 The last line is the go/no-go, decided 2026-11-16 and tightened 2026-11-17,
 before any real money: on the held-out replay days (`timemachine.py multiday
 --write trader/replays/multiday.json`) every signal of the rule, on at least
-10 days, with the low end of its by-day 95 % range above zero; AND net
+10 days, with the low end of its by-day 95 % range (Student-t on days - 1)
+above zero; AND net
 expectancy above zero on at least 200 paper trades since `paper_start`.
 Until both hold it prints NOT MET and why.
 

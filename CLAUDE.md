@@ -203,6 +203,14 @@ The skills are installed as directory junctions under .claude/skills
        never edit the registration to rescue a test.
     f. If both fail: point the replay at multi-day holds (wider stops, so the
        charges are a smaller share of the risk).
+    g. Same day, second pass: each registered verdict is frozen at the first
+       qualifying evening (scored on the sessions up to it, stored in
+       registered-verdicts.json, never re-scored); multiday --write/--json
+       blank the sealed test halves; the by-day range uses a Student-t
+       multiplier on days - 1; paper entries are paused (entries_paused in
+       the config) while the evening save keeps running, and paper restarts
+       only on a test that passes. The intraday-allowed list (2,298) is not a
+       liquidity screen.
 
 ## Rules
 

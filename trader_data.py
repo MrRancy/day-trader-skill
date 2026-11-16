@@ -427,14 +427,31 @@ def score_card(highs, lows, closes):
 
 # ---------------------------------------------------------------- trade metrics (shared by review and the replays)
 
+# two-sided 95 % Student-t multipliers by degrees of freedom; between rows the smaller df's (wider) value is used
+T95 = ((1, 12.706), (2, 4.303), (3, 3.182), (4, 2.776), (5, 2.571), (6, 2.447), (7, 2.365), (8, 2.306),
+       (9, 2.262), (10, 2.228), (11, 2.201), (12, 2.179), (13, 2.160), (14, 2.145), (15, 2.131), (16, 2.120),
+       (17, 2.110), (18, 2.101), (19, 2.093), (20, 2.086), (21, 2.080), (22, 2.074), (23, 2.069), (24, 2.064),
+       (25, 2.060), (26, 2.056), (27, 2.052), (28, 2.048), (29, 2.045), (30, 2.042), (40, 2.021), (60, 2.000),
+       (120, 1.980))
+
+
+def t95(df):
+    """The two-sided 95 % Student-t multiplier for df degrees of freedom (1.96 past 120)."""
+    best = None
+    for d, v in T95:
+        if d <= df:
+            best = v
+    return 12.706 if best is None else (best if df <= 120 else 1.96)
+
+
 def trade_metrics(trades):
     """Efficiency of a list of closed trades, each {"date": "YYYY-MM-DD", "net": rupees after charges,
     "risk_inr": rupees at risk at the stop (optional)}, in the order they happened.
 
     n, won, lost, net; expectancy (mean net a trade) with a 95 % interval (normal approximation, mean +- 1.96
     standard errors; None under 2 trades) and the same interval computed from one total per day
-    (expectancy_ci95_by_day: trades on one day rise and fall together, so they are not independent; None under 2
-    days); days (the dates with a trade); net R a trade (net / rupee risk, only trades with a risk) with its
+    (expectancy_ci95_by_day: trades on one day rise and fall together, so they are not independent; a Student-t
+    multiplier on days - 1 degrees of freedom, 2.26 at 10 days rather than 1.96; None under 2 days); days (the dates with a trade); net R a trade (net / rupee risk, only trades with a risk) with its
     interval; profit factor (rupees won / rupees lost; None with no loss); max drawdown (the deepest fall of the
     running net from its high, starting at 0); weekly net by ISO week."""
     nets = [float(t["net"]) for t in trades]
@@ -461,7 +478,7 @@ def trade_metrics(trades):
     if exp is not None and len(per_day) >= 2:
         nd = len(per_day)
         ss = sum((tot - exp * cnt) ** 2 for tot, cnt in per_day.values())
-        h = 1.96 * (ss * nd / (nd - 1.0)) ** 0.5 / n
+        h = t95(nd - 1) * (ss * nd / (nd - 1.0)) ** 0.5 / n
         dlo, dhi = exp - h, exp + h
     rs = [float(t["net"]) / float(t["risk_inr"]) for t in trades if t.get("risk_inr")]
     r, rlo, rhi = mean_ci(rs)

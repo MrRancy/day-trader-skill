@@ -58,6 +58,12 @@ saved bars, the replay and the journal, and names exactly one next step.
 The evening also scores the pre-registered tests on the sessions saved since
 2026-11-17 (`timemachine.py registered --write trader/replays/registered.json`).
 
+While the config has `entries_paused` (set 2026-11-17: the long breakout is
+retired), the morning, the gate and the evening still run and save
+everything, the status says "Paper entries are paused", the gate step says
+there is nothing to pick, and trader-risk blocks any entry. The evening's
+saved bars are what the registered tests are scored on, so keep it running.
+
 ## The unattended day
 
 ```bash
