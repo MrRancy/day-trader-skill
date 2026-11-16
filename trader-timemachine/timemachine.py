@@ -1450,8 +1450,11 @@ def md_extras(history, n_or=3):
     return out
 
 
-def md_variants(rule, only=None):
-    """The rule, then the rule with exactly one thing changed. Names are stable; `only` keeps a subset."""
+def md_variants(rule, only=None, base=None):
+    """The rule, then the rule with exactly one thing changed. Names are stable; `only` keeps a subset.
+    With `base` (a variant name) that variant becomes the new starting point: the list is the rule, the base, and
+    the base plus one more change each ("BASE + NAME"). On a short base the gate variants become the short
+    gate's own levels (below 30 %, below 50 %, no gate) and vwap, a long-only rule, drops out."""
     g = rule.get("gate_time") or "10:00"
     v = [("rule", {}),
          ("gate off", {"gate_pct": 0.0, "first_entry": g}),       # no gate, entries still from gate_time
@@ -1468,18 +1471,29 @@ def md_variants(rule, only=None):
          ("rel. volume top 20", {"rank": "rvol", "top_n": 20}),
          ("short below %g%%" % MD_SHORT_GATE, {"side": "short", "gate_pct": MD_SHORT_GATE}),
          ("vwap", {"strategy": "vwap"})]
+    if base:
+        found = dict(v).get(base)
+        if found is None:
+            raise TMError("--base %r is not a variant; one of: %s" % (base, ", ".join(n for n, _ in v[1:])))
+        if found.get("side") == "short":
+            gates = [("below 30%", {"gate_pct": 30.0}), ("below 50%", {"gate_pct": 50.0}),
+                     ("gate off", {"gate_pct": 0.0, "first_entry": g})]
+            v = [x for x in v if not x[0].startswith("gate") and x[0] not in ("vwap",)]
+            v = v[:1] + gates + v[1:]
+        stack = [("%s + %s" % (base, n), dict(found, **c)) for n, c in v[1:] if n != base]
+        v = [("rule", {}), (base, found)] + stack
     if only:
         keep = set(x.strip() for x in only.split(","))
-        v = [x for x in v if x[0] in keep or x[0] == "rule"]
+        v = [x for x in v if x[0] in keep or x[0] == "rule" or x[0] == base]
     return [(name, dict(rule, **change)) for name, change in v]
 
 
-def multiday_replay(days, rule, only=None, progress=None):
+def multiday_replay(days, rule, only=None, progress=None, base=None):
     """Replay every variant on every day, oldest first. Returns {name: {"rule", "days": [{date, breadth,
     gate_open, ledger, every}]}}. A day's history-based inputs (relative volume, the liquid set) come from earlier
     days only."""
     history = {}
-    variants = md_variants(rule, only)
+    variants = md_variants(rule, only, base)
     out = {name: {"rule": {k: v for k, v in r.items() if not k.startswith("_")}, "days": []} for name, r in variants}
     for day, path in days:
         d, sessions = load_universe(path, day)
@@ -1580,7 +1594,7 @@ def cmd_multiday(a):
     if len(days) < 2:
         raise TMError("need at least 2 saved days in %s (scan.py orb --save trader/replays/orb5m-DATE.json.gz)" % a.dir)
     prog = None if a.json else (lambda d: sys.stderr.write("  replayed %s\n" % d))
-    res = multiday_replay(days, rule, a.only, prog)
+    res = multiday_replay(days, rule, a.only, prog, a.base)
     s = multiday_summary(res, a.test)
     if a.write:
         _write(a.write, s)
@@ -1659,6 +1673,8 @@ def main(argv=None):
     p.add_argument("--to", dest="last", help="last day, YYYY-MM-DD")
     p.add_argument("--test", type=int, default=20, help="the last N days are held out and only scored (default 20)")
     p.add_argument("--only", help="comma-separated variant names to run beside the rule")
+    p.add_argument("--base", help="a variant name to start from: runs it plus one more change at a time "
+                                  "(e.g. --base \"short below 40%%\")")
     p.add_argument("--slippage", type=float, help="percent per side (default: config slippage_pct, else 0.05)")
     p.add_argument("--config", default="trader/config.json")
     p.add_argument("--write", metavar="PATH", help="save the summary as JSON")
