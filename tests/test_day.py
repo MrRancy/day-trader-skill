@@ -201,6 +201,8 @@ class TheCli(Scratch):
         self.assertEqual(code, 0)
         if os.name == "nt":
             self.assertIn("schtasks /Create /TN day-trader-india morning", out)
+            self.assertIn("-WakeToRun -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable", out)
+            self.assertIn("Set-ScheduledTask -TaskName 'day-trader-india evening' -Settings $s", out)
         # a holiday or a weekend: the scheduled steps say so and do nothing
         code, out, _ = run(["morning", "--now", "2026-11-10 08:45"])
         self.assertEqual((code, out.strip()), (0, "No session today (NSE holiday: Diwali-Balipratipada): nothing to run."))

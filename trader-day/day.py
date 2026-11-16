@@ -378,6 +378,14 @@ def schedule_tasks(python, root):
     return out
 
 
+def task_settings_script(names):
+    """PowerShell that sets what schtasks /Create cannot: wake the computer for the run, start and keep running on
+    battery, run a missed start as soon as the computer is available, stop after 3 hours."""
+    return ("$s = New-ScheduledTaskSettingsSet -WakeToRun -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries "
+            "-StartWhenAvailable -ExecutionTimeLimit (New-TimeSpan -Hours 3); "
+            + "; ".join("Set-ScheduledTask -TaskName '%s' -Settings $s | Out-Null" % n for n in names))
+
+
 def cmd_schedule(a, now, cfg):
     tasks = schedule_tasks(a.python or sys.executable, ROOT)
     if a.action == "show" or os.name != "nt":
@@ -401,9 +409,19 @@ def cmd_schedule(a, now, cfg):
         if p.returncode != 0:
             return 1
     if a.action == "install":
-        print("Installed. They run while you are signed in and the computer is awake; each skips weekends and NSE "
-              "holidays itself and logs to trader/logs/DATE.log. Entries still wait for you: the gate step stops "
-              "at the breakouts. Remove with: day.py schedule remove")
+        argv = ["powershell", "-NoProfile", "-NonInteractive", "-Command", task_settings_script([n for n, _, _ in tasks])]
+        if a.dry_run:
+            print("$ powershell -Command \"%s\"" % argv[-1])
+            return 0
+        p = subprocess.run(argv, capture_output=True, text=True)
+        if p.returncode != 0:
+            print("install: the tasks exist, but setting wake/battery/catch-up failed: %s"
+                  % ((p.stderr or p.stdout).strip().splitlines() or ["?"])[-1])
+            return 1
+        print("Installed. They run while you are signed in; each wakes the computer for its run (when the power "
+              "plan allows wake timers), starts on battery, runs a missed start when the computer is next available, "
+              "skips weekends and NSE holidays itself and logs to trader/logs/DATE.log. Entries still wait for you: "
+              "the gate step stops at the breakouts. Remove with: day.py schedule remove")
     return 0
 
 

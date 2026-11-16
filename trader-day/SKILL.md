@@ -79,7 +79,11 @@ holidays itself and checks the token first; with the TOTP lines in `.env` a
 dead token is replaced in memory (trader-broker, "The automatic token"). The
 gate step stops at the breakouts: picking a chart, the stop and the yes still
 wait for the user, so nothing is placed by a schedule. The tasks run while
-the user is signed in and the computer is awake.
+the user is signed in. `install` also sets what `schtasks` cannot: each task
+wakes the computer for its run (when the power plan allows wake timers),
+starts and keeps running on battery, runs a missed start as soon as the
+computer is next available (so a missed evening still saves the day's bars)
+and stops after 3 hours.
 
 ## The rules
 
