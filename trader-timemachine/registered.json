@@ -1,0 +1,41 @@
+{
+  "registered_on": "2026-11-17",
+  "why": "The last two intraday tests, written down before the first session they are scored on. The 20 held-out days of the multi-day replay were looked at many times, so these are judged only on sessions saved from score_from on. The long opening-range breakout is not tuned any further.",
+  "score_from": "2026-11-17",
+  "days_needed": 20,
+  "min_signal_days": 10,
+  "give_up_after": 60,
+  "pass": "every signal (Rs 10,000 each, after charges and turnover-scaled slippage) on the sessions its gate was open: the LOW end of the by-day 95% range of the net a signal is above zero. Judged at the first evening with at least 20 sessions scored and signals on at least 10 days; INCONCLUSIVE if that has not happened after 60 sessions. FAIL otherwise. Nothing is changed between now and the verdict.",
+  "rule": {
+    "target_r": 2.0,
+    "gate_pct": 65.0,
+    "gate_time": "10:00",
+    "cutoff": "11:00",
+    "budget": 10000.0,
+    "max_trades": 2,
+    "max_loss_pct": 3.0,
+    "position_pct": 75.0,
+    "min_price": 50.0,
+    "or_minutes": 15,
+    "first_entry": "10:00",
+    "top_n": 20,
+    "stop_after_loss": true,
+    "warn_charges_pct_of_risk": 15.0,
+    "slippage_pct": 0.05,
+    "slippage_model": "turnover",
+    "strategy": "orb"
+  },
+  "tests": [
+    {
+      "name": "short below 30%, shortable intraday",
+      "note": "Short the first 5-minute close below the 15-minute opening-range low, from 10:00 to 11:00, on sessions whose 10:00 breadth is at or under 30%; stop at the range midpoint, target 2R, flat at 15:15. Only stocks INDstocks allows intraday (INTRADAY_LEVERAGE above 1), frozen in the list of 2026-11-17.",
+      "change": {"side": "short", "gate_pct": 30.0},
+      "symbols_file": "shortable-2026-11-17.txt"
+    },
+    {
+      "name": "rel. volume top 20, gate off",
+      "note": "Long the first 5-minute close above the 15-minute opening-range high, from 09:35 to 11:00, every session (no breadth gate, so no reason to wait for 10:00), only among the 20 charts with the highest opening-range volume over their own average of the 20 sessions before, chosen at 09:30; stop at the range midpoint, target 2R, flat at 15:15.",
+      "change": {"rank": "rvol", "top_n": 20, "gate_pct": 0.0, "first_entry": "09:35"}
+    }
+  ]
+}

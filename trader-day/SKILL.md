@@ -55,6 +55,9 @@ watchlist, the entry, the plan, the Time Machine, the orders, the risk
 verdicts, the paper ledger's positions and today's closed trades, the
 saved bars, the replay and the journal, and names exactly one next step.
 
+The evening also scores the pre-registered tests on the sessions saved since
+2026-11-17 (`timemachine.py registered --write trader/replays/registered.json`).
+
 ## The unattended day
 
 ```bash

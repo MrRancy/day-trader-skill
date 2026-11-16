@@ -208,11 +208,23 @@ python3 trader-timemachine/timemachine.py multiday --test 20 --write trader/repl
 python3 trader-risk/check.py review --days 7
 ```
 
-The replay changes one setting at a time against the rule, fixes the
-settings on the earlier days and scores them on the last 20, with 0.05 %
-slippage a side and stops filled at the open when a bar gaps through them.
-The review reports net R a trade, expectancy with a 95 % range, profit
-factor, max drawdown and weekly net.
+The replay trades the paper config's own rule, changes one setting at a time,
+chooses on the earlier days and shows the last 20 only for the rule and that
+one choice (the rest stay sealed). Slippage is 0.05 % a side for a stock
+trading Rs 50 crore a day and more for thinner ones (`slippage_model`
+"turnover", up to 0.5 %), and a stop gapped through fills at the open. The
+95 % ranges of the every-signal numbers are computed from one total per day,
+because signals on one day rise and fall together. The review reports net R
+a trade, expectancy with a 95 % range, profit factor, max drawdown and weekly
+net.
+
+The 72 saved sessions (Aug 3 to Nov 16) say the long opening-range breakout
+does not cover its costs in any shape tried, so it is not tuned further. Two
+last intraday tests are written down in
+`trader-timemachine/registered.json` (a short side on days at or under 30 %
+breadth, only stocks INDstocks allows intraday; and the top 20 by relative
+volume with no gate) and are scored only on sessions saved from 2026-11-17,
+every evening, by `timemachine.py registered`.
 
 The routine runs itself on weekdays once `python3 trader-day/day.py schedule
 install` has set up the morning, gate and evening tasks (Windows Task
@@ -220,9 +232,11 @@ Scheduler, logs in `trader/logs/`), and the token renews itself when
 `.env` has `INDSTOCKS_CLIENT_ID`, `INDSTOCKS_MPIN` and
 `INDSTOCKS_TOTP_SECRET`. Entries still wait for a person.
 
-**Go/no-go, decided 2026-11-16.** No real money until both hold: net
-expectancy above zero on the held-out replay days, and net expectancy above
-zero over at least 200 paper trades. `check.py review` prints the verdict.
+**Go/no-go, decided 2026-11-16, tightened 2026-11-17.** No real money until
+both hold: on the held-out replay days, every signal of the paper rule on at
+least 10 days with the LOW end of its by-day 95 % range above zero (not just
+a positive average); and net expectancy above zero over at least 200 paper
+trades. `check.py review` prints the verdict.
 
 ## Fine print
 

@@ -349,6 +349,9 @@ def cmd_evening(a, now, cfg):
         print("== bars already saved: %s" % bundle)
     run_step("the evening replay", [script("timemachine"), "universe", bundle, "--compare", "--others", "--write"],
              a.dry_run, ok_codes=(0,))
+    run_step("the pre-registered tests, scored on new sessions only",
+             [script("timemachine"), "registered", "--write", os.path.join("trader", "replays", "registered.json")],
+             a.dry_run, ok_codes=(0,))
     notes = []
     for n in a.note or []:
         notes += ["--note", n]

@@ -120,11 +120,18 @@ in trader-budget turns them on):
   today (a sell in `trader/paper.json` with a `pnl`), every further entry is
   blocked for the day. Live fills are not read yet; with `"paper": false` the
   tool says so.
-- `max_charges_pct_of_risk` (15): the cost check. Round-trip charges at the
+- `max_charges_pct_of_risk`: the cost check. Round-trip charges at the
   stop over that share of the rupees at risk block the entry ("cost: ...").
   At Rs 10,000 a trade the charges are about Rs 27, so a 15 % cap needs
   about Rs 180 at risk: a stop of 2.4 % on a Rs 7,500 position. Tight stops
   on a small account are mostly charges.
+- `warn_charges_pct_of_risk` (15 in the paper config): the same check, logged
+  instead of blocking ("cost (logged, not blocking): ... would have blocked
+  it"). The paper config uses this one and leaves `max_charges_pct_of_risk`
+  null: the opening-range stops are mostly under 1 %, so a blocking 15 % cap
+  stops almost every paper trade (it would have blocked 410 of the rule's 476
+  train signals) and the 200 paper trades could never come. The replay reads
+  the same keys from the same config.
 
 ## The journal and the review
 
@@ -147,10 +154,12 @@ then the metrics for the paper trades and for the replay rule's ledger: net
 R a trade, expectancy (net rupees a trade) with its 95 % range, rupees won
 over rupees lost, max drawdown and net by week.
 
-The last line is the go/no-go, decided 2026-11-16, before any real money:
-net expectancy above zero on the held-out replay days (`timemachine.py
-multiday --write trader/replays/multiday.json`) AND on at least 200 paper
-trades since `paper_start`. Until both hold it prints NOT MET and why.
+The last line is the go/no-go, decided 2026-11-16 and tightened 2026-11-17,
+before any real money: on the held-out replay days (`timemachine.py multiday
+--write trader/replays/multiday.json`) every signal of the rule, on at least
+10 days, with the low end of its by-day 95 % range above zero; AND net
+expectancy above zero on at least 200 paper trades since `paper_start`.
+Until both hold it prints NOT MET and why.
 
 ## Steps
 

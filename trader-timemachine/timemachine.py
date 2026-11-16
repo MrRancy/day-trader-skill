@@ -1148,8 +1148,8 @@ def universe_replay(day, sessions, rule, rows=None, rates=None, scores=None, ext
     if not gate_open and rule.get("measure_closed") is False:
         rec["cash_end"] = rule["budget"]
         return rec
-    slip = float(rule.get("slippage_pct") or 0) / 100.0
     max_chg = rule.get("max_charges_pct_of_risk")
+    warn_chg = rule.get("warn_charges_pct_of_risk")
     strategy = rule.get("strategy", "orb")
     lo_min = first_min if not gate_min else max(first_min, gate_min)
     hi_min = cut_min or 15 * 60
@@ -1187,8 +1187,11 @@ def universe_replay(day, sessions, rule, rows=None, rates=None, scores=None, ext
         hits = sorted(hits, key=lambda h: -h[3]["rank"])[:int(rule["top_n"])]
         hits.sort(key=lambda h: h[:3])
     cash, trades, lost, open_until = float(rule["budget"]), 0, False, -1
-    for close_min, _, sym, sig in hits:
+    for close_min, neg_traded, sym, sig in hits:
         bars = sessions[sym]
+        # turnover from earlier days when known, else the opening range's turnover scaled to a whole session
+        tv = ((extras or {}).get(sym) or {}).get("turnover_avg") or (-neg_traded * SESSION_BARS / float(n_or))
+        slip = slip_for(rule, tv)
         kk = sig["k"]
         sd = sig.get("side", "long")
         short = sd == "short"
@@ -1236,9 +1239,12 @@ def universe_replay(day, sessions, rule, rows=None, rates=None, scores=None, ext
         e = {"symbol": sym, "at": clock(close_min), "entry": entry, "fill": fill, "stop": stop, "target": target,
              "risk": risk, "exit": ex, "why": why, "when": clock(when), "R": round(move / risk, 2),
              "qty": q_all, "gross": round(q_all * move, 2), "charges": chg_all,
-             "net": round(q_all * move - chg_all, 2), "side": sd, "risk_inr": round(risk_all, 2)}
-        if max_chg is not None and q_all and risk_all > 0 and \
-                100.0 * _charges_side(q_all, fill, stop, sd, rates) / risk_all > max_chg:
+             "net": round(q_all * move - chg_all, 2), "side": sd, "risk_inr": round(risk_all, 2),
+             "slip_pct": round(100 * slip, 3)}
+        cpct_all = 100.0 * _charges_side(q_all, fill, stop, sd, rates) / risk_all if q_all and risk_all > 0 else 0.0
+        if warn_chg is not None and cpct_all > warn_chg:
+            e["cost_flag"] = True                            # the cost check would block it; counted, not removed
+        if max_chg is not None and cpct_all > max_chg:
             e = None                                         # too much of the risk goes to charges at this size
         if e is not None:
             rec["every"].append(e)
@@ -1249,7 +1255,8 @@ def universe_replay(day, sessions, rule, rows=None, rates=None, scores=None, ext
         q = min(q, u_shares(rule["budget"] * rule["position_pct"] / 100, fill), u_shares(cash, fill))
         if q < 1:
             continue
-        if max_chg is not None and 100.0 * _charges_side(q, fill, stop, sd, rates) / (q * abs(fill - stop)) > max_chg:
+        cpct = 100.0 * _charges_side(q, fill, stop, sd, rates) / (q * abs(fill - stop))
+        if max_chg is not None and cpct > max_chg:
             continue
         chg = _charges_side(q, f_eff, x_eff, sd, rates)
         pnl = round(q * move - chg, 2)
@@ -1260,8 +1267,12 @@ def universe_replay(day, sessions, rule, rows=None, rates=None, scores=None, ext
         base = e or {"symbol": sym, "at": clock(close_min), "entry": entry, "fill": fill, "stop": stop,
                      "target": target, "risk": risk, "exit": ex, "why": why, "when": clock(when),
                      "R": round(move / risk, 2), "side": sd}
-        rec["ledger"].append(dict(base, qty=q, gross=round(q * move, 2), charges=chg, net=pnl, cash_after=cash,
-                                  risk_inr=round(q * abs(fill - stop), 2)))
+        row = dict(base, qty=q, gross=round(q * move, 2), charges=chg, net=pnl, cash_after=cash,
+                   risk_inr=round(q * abs(fill - stop), 2))
+        row.pop("cost_flag", None)
+        if warn_chg is not None and cpct > warn_chg:
+            row["cost_flag"] = True
+        rec["ledger"].append(row)
     rec["cash_end"] = cash
     return rec
 
@@ -1319,17 +1330,61 @@ def render_universe(rec, label):
     return "\n".join(out) + "\n"
 
 
-def cmd_universe(a):
-    cfg = {}
-    if a.config and os.path.exists(a.config):
-        with open(a.config, encoding="utf-8") as fh:
-            cfg = json.load(fh)
+def rule_from_config(cfg, slippage_default=0.0):
+    """The replay rule from the paper config, so the replay and the paper day trade the same rule: the gate, the
+    entry window, the budget, the max loss and position share, the target R, the trades a day, one loss ends it,
+    the cost check (max_charges_pct_of_risk blocks, warn_charges_pct_of_risk only counts what it would block) and
+    the slippage (slippage_pct; slippage_model "turnover" widens it for thinly traded stocks)."""
     rule = dict(U_DEFAULTS)
     rule["gate_pct"] = float(cfg.get("breadth_gate_pct") or 0) or U_DEFAULTS["gate_pct"]
     rule["gate_time"] = cfg.get("gate_time") or U_DEFAULTS["gate_time"]
     rule["budget"] = float(cfg.get("budget") or U_DEFAULTS["budget"])
     rule["max_trades"] = int(cfg.get("max_trades_per_day") or U_DEFAULTS["max_trades"])
     rule["stop_after_loss"] = bool(cfg.get("stop_after_loss", True))
+    if cfg.get("no_entries_after"):
+        rule["cutoff"] = cfg["no_entries_after"]
+    if cfg.get("no_entries_before"):
+        rule["first_entry"] = cfg["no_entries_before"]
+    if cfg.get("min_reward_risk"):
+        rule["target_r"] = float(cfg["min_reward_risk"])
+    if cfg.get("max_loss_per_trade_inr"):
+        rule["max_loss_pct"] = 100.0 * float(cfg["max_loss_per_trade_inr"]) / rule["budget"]
+    if cfg.get("max_position_pct"):
+        rule["position_pct"] = float(cfg["max_position_pct"])
+    for k in ("max_charges_pct_of_risk", "warn_charges_pct_of_risk"):
+        if cfg.get(k) is not None:
+            rule[k] = float(cfg[k])
+    rule["slippage_pct"] = float(cfg.get("slippage_pct", slippage_default))
+    for k in ("slippage_model", "slippage_ref_turnover_inr", "slippage_max_pct"):
+        if cfg.get(k) is not None:
+            rule[k] = cfg[k]
+    return rule
+
+
+SLIP_REF_TURNOVER = 5e8      # Rs 50 crore a day: at or above it the slippage is the flat slippage_pct
+SLIP_MAX_PCT = 0.5           # and never more than this a side
+
+
+def slip_for(rule, turnover):
+    """Slippage a side (a fraction) for a stock with this daily turnover (rupees). Flat slippage_pct, unless
+    slippage_model is "turnover": then slippage_pct * sqrt(ref / turnover), never under slippage_pct, never over
+    slippage_max_pct. An assumption scaled to liquidity, not a measured spread."""
+    base = float(rule.get("slippage_pct") or 0) / 100.0
+    if rule.get("slippage_model") != "turnover" or base <= 0:
+        return base
+    cap = float(rule.get("slippage_max_pct") or SLIP_MAX_PCT) / 100.0
+    if not turnover or turnover <= 0:
+        return cap
+    ref = float(rule.get("slippage_ref_turnover_inr") or SLIP_REF_TURNOVER)
+    return min(cap, max(base, base * (ref / float(turnover)) ** 0.5))
+
+
+def cmd_universe(a):
+    cfg = {}
+    if a.config and os.path.exists(a.config):
+        with open(a.config, encoding="utf-8") as fh:
+            cfg = json.load(fh)
+    rule = rule_from_config(cfg)
     if a.target:
         m = re.match(r"^\s*([0-9.]+)\s*r?\s*$", a.target, re.I)
         if not m or float(m.group(1)) <= 0:
@@ -1348,7 +1403,8 @@ def cmd_universe(a):
     if a.min_score is not None:
         rule["min_score"] = int(a.min_score)
     rule["strategy"] = a.strategy
-    rule["slippage_pct"] = float(a.slippage if a.slippage is not None else cfg.get("slippage_pct", 0.0))
+    if a.slippage is not None:
+        rule["slippage_pct"] = float(a.slippage)
     if a.side:
         rule["side"] = a.side
     if a.vwap_pct is not None:
@@ -1428,6 +1484,9 @@ MD_HISTORY = 20          # earlier days a stock's averages look back over
 MD_MIN_HISTORY = 5       # fewer earlier days than this: no average, so not rankable
 MD_LIQUID_N = 174        # the "liquid" set: the top N by average daily turnover on earlier days
 MD_SHORT_GATE = 40.0     # the short side trades days at or under this breadth
+MD_MIN_CHOICE_SIGNALS = 100   # a variant needs this many train signals to be chosen
+MD_NOT_CHOOSABLE = ("rule", "no slippage")   # the baseline, and a cost assumption rather than a setting
+REGISTERED = os.path.join(os.path.dirname(os.path.realpath(__file__)), "registered.json")
 
 
 def md_bundles(folder, first=None, last=None):
@@ -1488,16 +1547,29 @@ def md_variants(rule, only=None, base=None):
     return [(name, dict(rule, **change)) for name, change in v]
 
 
-def multiday_replay(days, rule, only=None, progress=None, base=None):
+def _md_row(d, t, ledger):
+    row = {"date": d, "net": t["net"], "risk_inr": t.get("risk_inr"), "why": t["why"]}
+    if ledger:
+        row["symbol"] = t["symbol"]
+    if t.get("cost_flag"):
+        row["cost_flag"] = True
+    return row
+
+
+def multiday_replay(days, rule, only=None, progress=None, base=None, variants=None, score_from=None):
     """Replay every variant on every day, oldest first. Returns {name: {"rule", "days": [{date, breadth,
     gate_open, ledger, every}]}}. A day's history-based inputs (relative volume, the liquid set) come from earlier
     days only."""
     history = {}
-    variants = md_variants(rule, only, base)
+    variants = variants or md_variants(rule, only, base)
     out = {name: {"rule": {k: v for k, v in r.items() if not k.startswith("_")}, "days": []} for name, r in variants}
     for day, path in days:
         d, sessions = load_universe(path, day)
         extras = md_extras(history)
+        if score_from and d < score_from:          # an earlier day: history only, not scored
+            for sym, bars in sessions.items():
+                history.setdefault(sym, []).append((sum(b["v"] for b in bars[:3]), sum(b["c"] * b["v"] for b in bars)))
+            continue
         liquid = sorted((x["turnover_avg"], s) for s, x in extras.items())[-MD_LIQUID_N:]
         liquid = [s for _, s in liquid]
         for name, r in variants:
@@ -1508,17 +1580,26 @@ def multiday_replay(days, rule, only=None, progress=None, base=None):
                 rr["symbols"] = liquid
             if rr.get("rank") == "rvol" and not extras:
                 continue
+            if rr.get("symbols") is not None and not isinstance(rr["symbols"], list):
+                rr["symbols"] = list(rr["symbols"])
             rec = universe_replay(d, sessions, rr, None, trader_data.CHARGE_RATES, None, extras)
             out[name]["days"].append({"date": d, "breadth": rec["breadth_pct"], "gate_open": rec["gate_open"],
-                                      "ledger": [{"date": d, "symbol": t["symbol"], "net": t["net"],
-                                                  "risk_inr": t.get("risk_inr"), "why": t["why"]} for t in rec["ledger"]],
-                                      "every": [{"date": d, "net": e["net"], "risk_inr": e.get("risk_inr"), "why": e["why"]}
-                                                for e in rec["every"]]})
+                                      "ledger": [_md_row(d, t, True) for t in rec["ledger"]],
+                                      "every": [_md_row(d, e, False) for e in rec["every"]]})
         for sym, bars in sessions.items():
             history.setdefault(sym, []).append((sum(b["v"] for b in bars[:3]), sum(b["c"] * b["v"] for b in bars)))
         if progress:
             progress(d)
     return out
+
+
+def md_choose(rows):
+    """The variant chosen on the train days: the best train every-signal expectancy among the settings with at
+    least MD_MIN_CHOICE_SIGNALS train signals (not the baseline, not the no-slippage cost assumption)."""
+    pool = [(r["train"]["every"]["expectancy"], name) for name, r in rows.items()
+            if name not in MD_NOT_CHOOSABLE and r["train"]["every"]["n"] >= MD_MIN_CHOICE_SIGNALS
+            and r["train"]["every"]["expectancy"] is not None]
+    return max(pool)[1] if pool else None
 
 
 def multiday_summary(result, test_days):
@@ -1538,8 +1619,17 @@ def multiday_summary(result, test_days):
                          "from": ds[0]["date"] if ds else None, "to": ds[-1]["date"] if ds else None,
                          "ledger": trader_data.trade_metrics(ledger), "every": trader_data.trade_metrics(every)}
         rows[name] = row
+    # choose on the train days only: the best train every-signal expectancy with enough signals; only the rule
+    # (the baseline) and the chosen variant show their test half, the rest stay sealed
+    chosen = md_choose(rows)
+    for name, r in rows.items():
+        r["sealed"] = name not in ("rule", chosen)
+        r["cost_flagged"] = {half: sum(1 for d in result[name]["days"] if d["gate_open"] for e in d["every"]
+                                       if e.get("cost_flag") and ((cut is None or d["date"] < cut) if half == "train"
+                                                                  else (cut is not None and d["date"] >= cut)))
+                             for half in ("train", "test")}
     return {"days": len(all_days), "train_to": all_days[all_days.index(cut) - 1] if cut else (all_days[-1] if all_days else None),
-            "test_from": cut, "variants": rows}
+            "test_from": cut, "chosen": chosen, "variants": rows}
 
 
 def render_multiday(s):
@@ -1555,21 +1645,36 @@ def render_multiday(s):
     out.append(hdr % ("variant", "half", "days", "trades", "ledger exp/trade (95%)", "ledger net, R/trade", "max DD",
                       "open", "signals", "signal exp/trade (95%)", "net R"))
 
-    def ex(m):
+    def ex(m, by_day=False):
         if not m["n"]:
             return "-"
-        c = m["expectancy_ci95"]
+        c = m["expectancy_ci95_by_day"] if by_day else m["expectancy_ci95"]
         return "%+.1f (%s,%s)" % (m["expectancy"], "%+.0f" % c[0] if c[0] is not None else "-",
                                    "%+.0f" % c[1] if c[1] is not None else "-")
+    unseal = s.get("unsealed")
     for name, row in s["variants"].items():
         for half in ("train", "test"):
             h = row[half]
             lg, ev = h["ledger"], h["every"]
-            out.append(hdr % (name if half == "train" else "", half, h["days"], lg["n"], ex(lg),
+            if half == "test" and row.get("sealed") and not unseal:
+                out.append("  %-*s %-5s %s" % (wide, "", half, "sealed: not chosen on the train days"))
+                continue
+            out.append(hdr % ((name + (" *" if name == s.get("chosen") else "")) if half == "train" else "", half,
+                              h["days"], lg["n"], ex(lg),
                               ("%+.0f, %s" % (lg["net"], ("%+.3f" % lg["net_R"]) if lg["net_R"] is not None else "-")) if lg["n"] else "-",
-                              "%.0f" % lg["max_drawdown"], h["open_days"], ev["n"], ex(ev),
+                              "%.0f" % lg["max_drawdown"], h["open_days"], ev["n"], ex(ev, True),
                               ("%+.3f" % ev["net_R"]) if ev["net_R"] is not None else "-"))
+    out.append("* chosen on the train days (best every-signal expectancy with %d+ signals); the signal range is "
+               "by day (one total per day), the ledger range by trade." % MD_MIN_CHOICE_SIGNALS)
+    if unseal:
+        out.append("UNSEALED: every variant's test half is shown. Picking the best of these on the test days is "
+                   "choosing on the test days; it will look better than it is.")
     rule = s["variants"].get("rule")
+    if rule and rule["rule"].get("warn_charges_pct_of_risk") is not None:
+        cf = rule["cost_flagged"]
+        out.append("The logged cost check (%g%% of the risk) would have blocked %d of %d train signals and %d of "
+                   "%d test signals of the rule." % (rule["rule"]["warn_charges_pct_of_risk"], cf["train"],
+                                                      rule["train"]["every"]["n"], cf["test"], rule["test"]["every"]["n"]))
     if rule:
         w = rule["test"]["ledger"]["weekly"]
         out.append("The rule's held-out weeks: " + (", ".join("%s %+.0f" % kv for kv in w.items()) or "no trades"))
@@ -1583,13 +1688,9 @@ def cmd_multiday(a):
     if a.config and os.path.exists(a.config):
         with open(a.config, encoding="utf-8") as fh:
             cfg = json.load(fh)
-    rule = dict(U_DEFAULTS)
-    rule["gate_pct"] = float(cfg.get("breadth_gate_pct") or 0) or U_DEFAULTS["gate_pct"]
-    rule["gate_time"] = cfg.get("gate_time") or U_DEFAULTS["gate_time"]
-    rule["budget"] = float(cfg.get("budget") or U_DEFAULTS["budget"])
-    rule["max_trades"] = int(cfg.get("max_trades_per_day") or U_DEFAULTS["max_trades"])
-    rule["stop_after_loss"] = bool(cfg.get("stop_after_loss", True))
-    rule["slippage_pct"] = float(a.slippage if a.slippage is not None else cfg.get("slippage_pct", 0.05))
+    rule = rule_from_config(cfg, slippage_default=0.05)
+    if a.slippage is not None:
+        rule["slippage_pct"] = float(a.slippage)
     rule["strategy"] = "orb"
     days = md_bundles(a.dir, a.first, a.last)
     if len(days) < 2:
@@ -1597,15 +1698,82 @@ def cmd_multiday(a):
     prog = None if a.json else (lambda d: sys.stderr.write("  replayed %s\n" % d))
     res = multiday_replay(days, rule, a.only, prog, a.base)
     s = multiday_summary(res, a.test)
+    s["unsealed"] = bool(a.unseal)
     if a.write:
         _write(a.write, s)
     if a.json:
         print(json.dumps(s, indent=2))
     else:
         sys.stdout.write(render_multiday(s))
-        r = s["variants"]["rule"]["test"]["ledger"]
-        print("Go/no-go, replay half: %s." % ("PASS, held-out expectancy above zero" if r["n"] and r["expectancy"] > 0
-                                             else "NOT MET, held-out expectancy %s" % (r["expectancy"] if r["n"] else "n/a (no trades)")))
+        go, why = trader_data.go_no_go(s["variants"]["rule"]["test"]["every"], None, min_paper_trades=0)
+        why = [w for w in why if "paper" not in w]
+        print("Go/no-go, replay half: %s." % ("PASS" if not why else "NOT MET, " + "; ".join(why)))
+    return 0
+
+
+# ---------------------------------------------------------------- pre-registered tests, scored on new days only
+
+def registered_variants(reg, folder):
+    """[(name, rule)] from a registration: the frozen rule plus each test's change; a symbols_file (one symbol a
+    line, next to the registration) restricts the charts."""
+    out = []
+    for t in reg["tests"]:
+        r = dict(reg["rule"], **t.get("change", {}))
+        if t.get("symbols_file"):
+            with open(os.path.join(folder, t["symbols_file"]), encoding="utf-8") as fh:
+                r["symbols"] = [x.strip() for x in fh if x.strip() and not x.startswith("#")]
+        out.append((t["name"], r))
+    return out
+
+
+def registered_verdict(reg, every_days, every):
+    """(state, why) for one test: "too early", "PASS", "FAIL" or "INCONCLUSIVE", by the registration's rule."""
+    need, min_open, give_up = reg["days_needed"], reg["min_signal_days"], reg["give_up_after"]
+    lo = (every.get("expectancy_ci95_by_day") or [None])[0]
+    if every_days < need or (every.get("days") or 0) < min_open:
+        if every_days >= give_up:
+            return "INCONCLUSIVE", "%d sessions scored, signals on %d days, %d needed" % (every_days, every.get("days") or 0, min_open)
+        return "too early", "%d of %d sessions, signals on %d of %d days" % (every_days, need, every.get("days") or 0, min_open)
+    if lo is not None and lo > 0:
+        return "PASS", "by-day 95%% range %+.1f to %+.1f a signal" % tuple(every["expectancy_ci95_by_day"])
+    return "FAIL", "by-day 95%% range %s to %s a signal: the low end is not above zero" % tuple(every["expectancy_ci95_by_day"])
+
+
+def cmd_registered(a):
+    path = a.registration or REGISTERED
+    with open(path, encoding="utf-8") as fh:
+        reg = json.load(fh)
+    days = md_bundles(a.dir)
+    first = next((i for i, (d, _) in enumerate(days) if d >= reg["score_from"]), len(days))
+    days = days[max(0, first - MD_HISTORY):]             # the earlier days only feed the history averages
+    scored = [d for d, _ in days if d >= reg["score_from"]]
+    out = ["Pre-registered tests (registered %s, scored on sessions from %s; written down before any of them):"
+           % (reg["registered_on"], reg["score_from"]),
+           "  pass: %s" % reg["pass"]]
+    result = {"registered_on": reg["registered_on"], "score_from": reg["score_from"], "sessions": scored, "tests": {}}
+    if scored:
+        prog = None if a.json else (lambda d: sys.stderr.write("  replayed %s\n" % d))
+        res = multiday_replay(days, None, progress=prog, variants=registered_variants(reg, os.path.dirname(path)),
+                              score_from=reg["score_from"])
+    else:
+        res = {name: {"days": []} for name, _ in registered_variants(reg, os.path.dirname(path))}
+    for name, v in res.items():
+        every = trader_data.trade_metrics([e for d in v["days"] if d["gate_open"] for e in d["every"]])
+        ledger = trader_data.trade_metrics([t for d in v["days"] for t in d["ledger"]])
+        state, why = registered_verdict(reg, len(scored), every)
+        result["tests"][name] = {"state": state, "why": why, "open_days": sum(1 for d in v["days"] if d["gate_open"]),
+                                 "every": every, "ledger": ledger}
+        out.append("  %s: %s (%s)" % (name, state, why))
+        if every["n"]:
+            c = every["expectancy_ci95_by_day"]
+            out.append("    every signal: %d on %d days, %+.1f a signal (by-day 95%% %s to %s); ledger %s"
+                       % (every["n"], every["days"], every["expectancy"],
+                          "%+.1f" % c[0] if c[0] is not None else "-", "%+.1f" % c[1] if c[1] is not None else "-",
+                          ("%d trades, net %+.0f" % (ledger["n"], ledger["net"])) if ledger["n"] else "no trades"))
+    out.append("Counts on saved bars after charges and slippage. Not a forecast.")
+    if a.write:
+        _write(a.write, result)
+    print(json.dumps(result, indent=2) if a.json else "\n".join(out))
     return 0
 
 
@@ -1674,6 +1842,15 @@ def main(argv=None):
     p.add_argument("--to", dest="last", help="last day, YYYY-MM-DD")
     p.add_argument("--test", type=int, default=20, help="the last N days are held out and only scored (default 20)")
     p.add_argument("--only", help="comma-separated variant names to run beside the rule")
+    p = sub.add_parser("registered", help="score the pre-registered tests on the sessions saved since they were "
+                                          "written down (registered.json)")
+    p.add_argument("--dir", default=os.path.join("trader", "replays"), help="the saved bundles")
+    p.add_argument("--registration", help="the registration file (default: registered.json next to this script)")
+    p.add_argument("--write", help="save the result as JSON")
+    p.add_argument("--json", action="store_true")
+    p = sub.choices["multiday"]
+    p.add_argument("--unseal", action="store_true",
+                   help="show every variant's test half (normally only the rule's and the train choice's)")
     p.add_argument("--base", help="a variant name to start from: runs it plus one more change at a time "
                                   "(e.g. --base \"short below 40%%\")")
     p.add_argument("--slippage", type=float, help="percent per side (default: config slippage_pct, else 0.05)")
@@ -1685,7 +1862,7 @@ def main(argv=None):
         ap.print_help()
         return 1
     try:
-        return {"run": cmd_run, "chart": cmd_chart, "universe": cmd_universe, "multiday": cmd_multiday}[a.cmd](a)
+        return {"run": cmd_run, "chart": cmd_chart, "universe": cmd_universe, "multiday": cmd_multiday, "registered": cmd_registered}[a.cmd](a)
     except TMError as e:
         print("timemachine.py: %s" % e, file=sys.stderr)
         return 1

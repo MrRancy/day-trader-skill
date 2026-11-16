@@ -486,10 +486,170 @@ class JournalAndReview(unittest.TestCase):
             self.assertEqual(code, 0, err)
             self.assertIn("1 journal day, 0 with a closed trade", out)
             self.assertIn("gate      open on 0 of 1 days read", out)
-            self.assertIn("go/no-go  NOT MET: no held-out replay trades yet (timemachine.py multiday); 0 paper trades, 200 needed", out)
+            self.assertIn("go/no-go  NOT MET: no held-out replay signals yet (timemachine.py multiday); 0 paper trades, 200 needed", out)
             code, out, _ = run(check, ["review", "--today", "2026-10-01", "--days", "3"] + args)
             self.assertEqual(code, 1)
             self.assertIn("No journal days", out)
+
+
+class EvidenceRules(unittest.TestCase):
+    """2026-11-17: one rule for paper and replay, a logged cost check, turnover slippage, by-day ranges, a stricter
+    replay go/no-go, choosing on the train days, and the pre-registered tests scored on new sessions only."""
+
+    def test_rule_from_config_is_the_paper_rule(self):
+        cfg = {"budget": 10000, "breadth_gate_pct": 65, "gate_time": "10:00", "no_entries_before": "10:00",
+               "no_entries_after": "11:00", "min_reward_risk": 2.0, "max_loss_per_trade_inr": 300,
+               "max_position_pct": 75, "max_trades_per_day": 2, "stop_after_loss": True,
+               "max_charges_pct_of_risk": None, "warn_charges_pct_of_risk": 15, "slippage_pct": 0.05,
+               "slippage_model": "turnover"}
+        r = tm.rule_from_config(cfg)
+        self.assertEqual((r["gate_pct"], r["first_entry"], r["cutoff"], r["target_r"], r["max_loss_pct"],
+                          r["position_pct"], r["max_trades"], r["warn_charges_pct_of_risk"], r["slippage_model"]),
+                         (65.0, "10:00", "11:00", 2.0, 3.0, 75.0, 2, 15.0, "turnover"))
+        self.assertNotIn("max_charges_pct_of_risk", r)          # null in the config: no blocking cap
+        self.assertEqual(tm.rule_from_config({})["slippage_pct"], 0.0)
+        self.assertEqual(tm.rule_from_config({}, 0.05)["slippage_pct"], 0.05)
+        # the shipped paper config: the cap logs instead of blocking, so paper and replay can both reach 200 trades
+        with open(os.path.join(os.path.dirname(FIX), "..", "trader-budget", "paper.example.json")) as fh:
+            ex = json.load(fh)
+        self.assertEqual((ex["max_charges_pct_of_risk"], ex["warn_charges_pct_of_risk"], ex["slippage_model"]),
+                         (None, 15, "turnover"))
+
+    def test_turnover_slippage(self):
+        r = {"slippage_pct": 0.05, "slippage_model": "turnover"}
+        self.assertEqual(tm.slip_for(r, 5e9), 0.0005)           # Rs 500 crore a day: the flat 0.05 %
+        self.assertEqual(round(tm.slip_for(r, 5e7), 6), round(0.0005 * 10 ** 0.5, 6))   # Rs 5 crore: x sqrt(10)
+        self.assertEqual(tm.slip_for(r, 1e5), 0.005)            # capped at 0.5 %
+        self.assertEqual(tm.slip_for(r, None), 0.005)
+        self.assertEqual(tm.slip_for({"slippage_pct": 0.05}, 1e5), 0.0005)    # flat model
+        day, sessions = tm.load_universe(ORB)
+        rows = tm.trader_data.parse_instruments(tm.trader_data.read_text(MASTER))
+        g = dict(tm.U_DEFAULTS, stop_after_loss=True, gate_pct=0.0, slippage_pct=0.05, slippage_model="turnover")
+        rec = tm.universe_replay(day, sessions, g, rows)
+        s = tm.universe_summary(rec)
+        # the 174 fixture charts are liquid: Rs 7.81 worse than the flat -2,173.67, at most 0.084 % a side
+        self.assertEqual((s["breakouts"], s["net"], max(e["slip_pct"] for e in rec["every"])), (75, -2181.48, 0.084))
+
+    def test_the_logged_cost_check(self):
+        day, sessions = tm.load_universe(ORB)
+        rows = tm.trader_data.parse_instruments(tm.trader_data.read_text(MASTER))
+        g = dict(tm.U_DEFAULTS, stop_after_loss=True, gate_pct=0.0, warn_charges_pct_of_risk=15)
+        rec = tm.universe_replay(day, sessions, g, rows)
+        s = tm.universe_summary(rec)
+        # nothing removed (the same 75 and -1,542.54 as with no check); 70 of them flagged, as the blocking cap
+        # kept only 5
+        self.assertEqual((s["breakouts"], s["net"], s["ledger_net"]), (75, -1542.54, 60.32))
+        self.assertEqual(sum(1 for e in rec["every"] if e.get("cost_flag")), 70)
+        self.assertEqual(sum(1 for e in rec["ledger"] if e.get("cost_flag")), 1)
+        # trader-risk: a warning, not a block
+        with open(ORDERS) as fh:
+            orders = json.load(fh)["orders"]
+        cfg = {"budget": 100000, "breadth_gate_pct": 65, "gate_time": "10:00", "stop_after_loss": True,
+               "warn_charges_pct_of_risk": 1}
+        opened = {"date": "2026-11-03", "time": "10:00", "pct": 71.9, "open": True, "reason": "open"}
+        res = check.check(orders, cfg, now=at("10:01"), breadth=opened)
+        self.assertEqual((res["pass"], res["block"]), (1, 0))
+        w = [x for r in res["results"] for x in r["warnings"] if x.startswith("cost (logged")]
+        self.assertEqual(len(w), 1)
+        self.assertIn("a 1% cap (warn_charges_pct_of_risk) would have blocked it", w[0])
+
+    def test_by_day_range(self):
+        trades = [{"date": "2026-11-03", "net": 10}, {"date": "2026-11-03", "net": 12},
+                  {"date": "2026-11-04", "net": -20}, {"date": "2026-11-04", "net": -18},
+                  {"date": "2026-11-05", "net": 5}]
+        m = tm.trader_data.trade_metrics(trades)
+        # day totals 22, -38, 5 around a mean of -2.2 a trade: sqrt(1877.76 * 3/2) / 5 * 1.96 = 20.8
+        self.assertEqual((m["expectancy"], m["expectancy_ci95"], m["days"], m["expectancy_ci95_by_day"]),
+                         (-2.2, [-15.84, 11.44], 3, [-23.0, 18.6]))
+        one = tm.trader_data.trade_metrics(trades[:2])
+        self.assertEqual((one["days"], one["expectancy_ci95_by_day"]), (1, [None, None]))
+
+    def test_the_stricter_go_no_go(self):
+        gng = tm.trader_data.go_no_go
+        paper = {"n": 250, "expectancy": 5.0}
+
+        def rep(n, days, lo):
+            return {"n": n, "days": days, "expectancy": 3.0, "expectancy_ci95_by_day": [lo, 9.0]}
+        self.assertEqual(gng(rep(900, 12, 0.4), paper), (True, []))
+        go, why = gng(rep(6, 3, 50.0), paper)                       # a positive average on 3 days is not enough
+        self.assertEqual((go, why), (False, ["held-out replay has signals on 3 days, 10 needed"]))
+        go, why = gng(rep(900, 12, -1.5), paper)
+        self.assertFalse(go)
+        self.assertIn("the low end is not above zero", why[0])
+        self.assertEqual(gng(None, None)[1], ["no held-out replay signals yet (timemachine.py multiday)",
+                                             "0 paper trades, 200 needed"])
+
+    def test_choose_on_train_and_seal_the_rest(self):
+        def row(n, exp):
+            return {"train": {"every": {"n": n, "expectancy": exp}}}
+        rows = {"rule": row(500, -1.0), "no slippage": row(500, -5.0), "a": row(500, -12.0), "b": row(50, -1.0),
+                "c": row(500, -15.0)}
+        self.assertEqual(tm.md_choose(rows), "a")     # b has too few signals; rule and no slippage are not settings
+        self.assertIsNone(tm.md_choose({"rule": row(500, 3.0)}))
+        # the fixture's six days: the chosen variant and the rule show their test half, the rest are sealed
+        import gzip as gz
+        src = json.load(gz.open(ORB, "rt"))
+        folder = tempfile.mkdtemp()
+        for k in range(6):
+            doc = dict(src, bars={s: [dict(b, ts=b["ts"] + 86400 * k) for b in bars] for s, bars in src["bars"].items()})
+            with gz.open(os.path.join(folder, "orb5m-2026-11-%02d.json.gz" % (3 + k)), "wt") as fh:
+                json.dump(doc, fh)
+        rule = dict(tm.U_DEFAULTS, stop_after_loss=True, slippage_pct=0.05, strategy="orb")
+        res = tm.multiday_replay(tm.md_bundles(folder), rule, "gate off,target 3R,no slippage")
+        s = tm.multiday_summary(res, 2)
+        # the fixture day's gate (62.6 %) is closed, so only "gate off" has signals on open days to choose by
+        self.assertEqual(s["chosen"], "gate off")
+        self.assertEqual({n: v["sealed"] for n, v in s["variants"].items()},
+                         {"rule": False, "gate off": False, "target 3R": True, "no slippage": True})
+        text = tm.render_multiday(s)
+        self.assertEqual(text.count("sealed: not chosen on the train days"), 2)
+        self.assertIn("gate off *", text)
+        self.assertEqual(s["variants"]["gate off"]["cost_flagged"], {"train": 0, "test": 0})   # no warn cap set
+        s["unsealed"] = True
+        self.assertIn("UNSEALED", tm.render_multiday(s))
+
+    def test_registration(self):
+        with open(tm.REGISTERED, encoding="utf-8") as fh:
+            reg = json.load(fh)
+        self.assertEqual((reg["registered_on"], reg["score_from"], reg["days_needed"], reg["min_signal_days"],
+                          reg["give_up_after"]), ("2026-11-17", "2026-11-17", 20, 10, 60))
+        v = dict(tm.registered_variants(reg, os.path.dirname(tm.REGISTERED)))
+        short = v["short below 30%, shortable intraday"]
+        self.assertEqual((short["side"], short["gate_pct"], short["cutoff"], short["target_r"], len(short["symbols"])),
+                         ("short", 30.0, "11:00", 2.0, 2298))
+        rv = v["rel. volume top 20, gate off"]
+        self.assertEqual((rv.get("side"), rv["rank"], rv["top_n"], rv["gate_pct"], rv["first_entry"]),
+                         (None, "rvol", 20, 0.0, "09:35"))
+        verdict = tm.registered_verdict
+        ok = {"n": 400, "days": 12, "expectancy_ci95_by_day": [0.5, 9.0]}
+        self.assertEqual(verdict(reg, 5, ok)[0], "too early")
+        self.assertEqual(verdict(reg, 20, ok)[0], "PASS")
+        self.assertEqual(verdict(reg, 20, dict(ok, expectancy_ci95_by_day=[-0.5, 9.0]))[0], "FAIL")
+        self.assertEqual(verdict(reg, 30, dict(ok, days=6))[0], "too early")     # waits for 10 signal days
+        self.assertEqual(verdict(reg, 60, dict(ok, days=6))[0], "INCONCLUSIVE")
+
+    def test_registered_scores_only_new_sessions(self):
+        import gzip as gz
+        src = json.load(gz.open(ORB, "rt"))
+        folder = tempfile.mkdtemp()
+        for k in range(7):
+            doc = dict(src, bars={s: [dict(b, ts=b["ts"] + 86400 * k) for b in bars] for s, bars in src["bars"].items()})
+            with gz.open(os.path.join(folder, "orb5m-2026-11-%02d.json.gz" % (3 + k)), "wt") as fh:
+                json.dump(doc, fh)
+        reg = {"registered_on": "2026-11-08", "score_from": "2026-11-08", "days_needed": 2, "min_signal_days": 2,
+               "give_up_after": 5, "pass": "low end above zero",
+               "rule": dict(tm.U_DEFAULTS, stop_after_loss=True, slippage_pct=0.05, strategy="orb"),
+               "tests": [{"name": "gate off", "change": {"gate_pct": 0.0}}]}
+        path = os.path.join(folder, "reg.json")
+        with open(path, "w") as fh:
+            json.dump(reg, fh)
+        code, out, err = run(tm, ["registered", "--dir", folder, "--registration", path, "--json"])
+        self.assertEqual(code, 0)
+        doc = json.loads(out)
+        self.assertEqual(doc["sessions"], ["2026-11-08", "2026-11-09"])   # Nov 3-7 feed the history only
+        t = doc["tests"]["gate off"]
+        self.assertEqual((t["every"]["n"], t["every"]["days"]), (150, 2))
+        self.assertEqual(t["state"], "FAIL")
 
 
 if __name__ == "__main__":

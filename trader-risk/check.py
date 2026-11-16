@@ -81,6 +81,8 @@ DEFAULTS = {
     "breadth_gate_pct": None, "gate_time": "10:00", "stop_after_loss": False,
     # the cost check (off unless set): round-trip charges at the stop as a share of the rupees at risk
     "max_charges_pct_of_risk": None,
+    # the same check, logged instead of blocking: a warning names what the cap would have blocked
+    "warn_charges_pct_of_risk": None,
 }
 # the fields INDstocks reads (POST /order and POST /smart/order); the fingerprint covers these only
 INDSTOCKS_FIELDS = ("security_id", "exchange", "segment", "product", "txn_type", "order_type", "validity",
@@ -572,6 +574,11 @@ def check(orders, cfg, portfolio=None, prices=None, state=None, today=None, now=
                                      "over your %s max loss per trade"
                                      % (_num(shares), _p(risk_ps), money(max_loss), money(chg), money(max_loss_net),
                                         money(cap)))
+                    wpct = _f(c.get("warn_charges_pct_of_risk"))
+                    if wpct and max_loss > 0 and 100.0 * chg / max_loss > wpct + 1e-9:
+                        warns.append("cost (logged, not blocking): round-trip charges %s are %.1f%% of the %s at "
+                                     "risk at the stop; a %s%% cap (warn_charges_pct_of_risk) would have blocked it"
+                                     % (money(chg), 100.0 * chg / max_loss, money(max_loss), _num(wpct)))
                     cpct = _f(c.get("max_charges_pct_of_risk"))
                     if cpct and max_loss > 0 and 100.0 * chg / max_loss > cpct + 1e-9:
                         later.append("cost: round-trip charges %s are %.1f%% of the %s at risk at the stop, over your "
@@ -1009,7 +1016,7 @@ def cmd_review(a, now):
                     every_day.append(jj)
     paper_all = trader_data.trade_metrics([t for jj in every_day for t in jj.get("paper_trades") or []])
     md = read_json(a.multiday, "multi-day replay", required=False)
-    held_out = (((md or {}).get("variants") or {}).get("rule") or {}).get("test", {}).get("ledger")
+    held_out = (((md or {}).get("variants") or {}).get("rule") or {}).get("test", {}).get("every")
     go, reasons = trader_data.go_no_go(held_out, paper_all)
     r["go"] = {"go": go, "reasons": reasons, "paper_since": since, "paper_trades": paper_all["n"],
                "held_out_expectancy": held_out.get("expectancy") if held_out else None}

@@ -168,13 +168,25 @@ over the stock's own average on earlier days, chosen at 09:30 so no later
 bar picks the chart), a short side on days at or under 40 % breadth, and
 VWAP. Inputs that need history come from earlier days only, and wait for 5.
 
-The last `--test` days (20) are held out: settings are chosen on the days
-before them and only scored on the held-out days. Per half it prints the
+The rule is the paper config's own (`rule_from_config`: the gate, the entry
+window, the target R, the max loss, the cost check and the slippage), so the
+replay and the paper day trade the same thing.
+
+The last `--test` days (20) are held out. The tool chooses on the days
+before them (the best train every-signal expectancy among the settings with
+100 or more signals; not the rule, not "no slippage") and shows the held-out
+half only for the rule and that choice, marked `*`; every other test half
+prints "sealed". `--unseal` shows them all, with a warning: picking the best
+of 15 on the held-out days is choosing on them. Per half it prints the
 ledger (the Rs 10,000 day sized to the max loss) and every signal (Rs 10,000
 each, on the days the gate is open): trades, expectancy a trade with its
-95 % range, net R a trade, rupees won over rupees lost and max drawdown, then the rule's
-held-out weeks and the replay half of the go/no-go (held-out expectancy
-above zero). `--write` saves the summary that `check.py review` reads.
+95 % range (by trade for the ledger, by day for the signals: one total per
+day, because a day's signals rise and fall together), net R a trade, rupees
+won over rupees lost and max drawdown, how many of the rule's signals the
+logged cost check would have blocked, the rule's held-out weeks and the
+replay half of the go/no-go (10 or more signal days, the low end of the
+by-day range above zero). `--write` saves the summary that `check.py
+review` reads.
 
 `--base NAME` moves the starting point to one variant and stacks one more
 change on it at a time ("short below 40% + liquid 174"). On a short base
@@ -184,7 +196,33 @@ days again, so the further you stack, the less "held out" they are.
 
 Fills are honest by default: 0.05 % slippage a side on every market fill
 (`slippage_pct` in the config, `--slippage`), a stop that a later bar opens
-through fills at that open, a target is a resting limit at its price.
+through fills at that open, a target is a resting limit at its price. With
+`"slippage_model": "turnover"` (the paper config) the slippage grows for
+thin stocks: 0.05 % at Rs 50 crore a day or more, times the square root of
+Rs 50 crore over the stock's daily turnover below that, at most 0.5 %. The
+turnover is the stock's average on earlier days, else its opening range
+scaled to a session. An assumption scaled to liquidity, not a measured
+spread; on the 72 days it moved the rule's held-out signals from about Rs -50
+to Rs -66 a signal.
+
+## The registered tests
+
+```bash
+python3 "${CLAUDE_SKILL_DIR}/timemachine.py" registered
+```
+
+`registered.json` (next to the script) holds two tests written down on
+2026-11-17 before the first session they are scored on, with the frozen
+paper rule and the pass rule: a short side on days at or under 30 %
+breadth, only the 2,298 stocks INDstocks allows intraday
+(`shortable-2026-11-17.txt`, INTRADAY_LEVERAGE above 1); and the top 20 by
+relative volume, long, no gate, entries from 09:35. They are scored only on
+sessions saved from `score_from`, every signal with by-day ranges. Verdict at
+the first evening with 20 sessions scored and signals on 10 days: PASS when
+the low end of the by-day 95 % range is above zero, else FAIL; INCONCLUSIVE
+after 60 sessions without 10 signal days. The evening step runs it. Do not
+edit the file to rescue a test; a new idea gets a new registration and new
+days.
 `universe` takes the same `--slippage` and `--side short`, and on a
 gate-closed day it now measures every breakout ("measured, not taken") so
 the journal records what the gate kept you out of; only the ledger is empty.

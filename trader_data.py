@@ -432,7 +432,9 @@ def trade_metrics(trades):
     "risk_inr": rupees at risk at the stop (optional)}, in the order they happened.
 
     n, won, lost, net; expectancy (mean net a trade) with a 95 % interval (normal approximation, mean +- 1.96
-    standard errors; None under 2 trades); net R a trade (net / rupee risk, only trades with a risk) with its
+    standard errors; None under 2 trades) and the same interval computed from one total per day
+    (expectancy_ci95_by_day: trades on one day rise and fall together, so they are not independent; None under 2
+    days); days (the dates with a trade); net R a trade (net / rupee risk, only trades with a risk) with its
     interval; profit factor (rupees won / rupees lost; None with no loss); max drawdown (the deepest fall of the
     running net from its high, starting at 0); weekly net by ISO week."""
     nets = [float(t["net"]) for t in trades]
@@ -449,6 +451,18 @@ def trade_metrics(trades):
         return m, m - h, m + h
 
     exp, lo, hi = mean_ci(nets)
+    # by day: the per-trade mean's standard error with the day as the unit (a cluster-robust ratio estimate)
+    per_day = {}
+    for t in trades:
+        k = t.get("date")
+        tot, cnt = per_day.get(k, (0.0, 0))
+        per_day[k] = (tot + float(t["net"]), cnt + 1)
+    dlo = dhi = None
+    if exp is not None and len(per_day) >= 2:
+        nd = len(per_day)
+        ss = sum((tot - exp * cnt) ** 2 for tot, cnt in per_day.values())
+        h = 1.96 * (ss * nd / (nd - 1.0)) ** 0.5 / n
+        dlo, dhi = exp - h, exp + h
     rs = [float(t["net"]) / float(t["risk_inr"]) for t in trades if t.get("risk_inr")]
     r, rlo, rhi = mean_ci(rs)
     won = sum(x for x in nets if x > 0)
@@ -469,6 +483,7 @@ def trade_metrics(trades):
 
     return {"n": n, "won": sum(1 for x in nets if x > 0), "lost": sum(1 for x in nets if x <= 0),
             "net": round(sum(nets), 2), "expectancy": rd(exp), "expectancy_ci95": [rd(lo), rd(hi)],
+            "days": len(per_day), "expectancy_ci95_by_day": [rd(dlo), rd(dhi)],
             "net_R": rd(r, 3), "net_R_ci95": [rd(rlo, 3), rd(rhi, 3)], "r_trades": len(rs),
             "profit_factor": rd(won / lost) if lost > 0 else None, "max_drawdown": round(dd, 2),
             "weekly": dict(sorted(weekly.items()))}
@@ -492,14 +507,25 @@ def render_metrics(m, unit="trade"):
                 "{:,.2f}".format(m["max_drawdown"])))
 
 
-def go_no_go(replay_test, paper, min_paper_trades=200):
-    """The rule before real money (decided 2026-11-16): net expectancy above zero on the held-out replay days AND
-    on at least min_paper_trades paper trades. Both are trade_metrics() dicts (or None). Returns (go, reasons)."""
+GO_MIN_REPLAY_DAYS = 10     # held-out days with signals before the replay half can pass
+
+
+def go_no_go(replay_test, paper, min_paper_trades=200, min_replay_days=GO_MIN_REPLAY_DAYS):
+    """The rule before real money (decided 2026-11-16, tightened 2026-11-17). Replay half: every signal of the
+    paper rule on the held-out days its gate was open, on at least min_replay_days days, with the LOWER end of
+    the by-day 95 % range above zero (a positive average on a handful of trades is a coin flip). Paper half: net
+    expectancy above zero on at least min_paper_trades paper trades. Both are trade_metrics() dicts (or None).
+    Returns (go, reasons)."""
     reasons = []
+    lo = ((replay_test or {}).get("expectancy_ci95_by_day") or [None])[0]
     if not replay_test or not replay_test["n"]:
-        reasons.append("no held-out replay trades yet (timemachine.py multiday)")
-    elif replay_test["expectancy"] is None or replay_test["expectancy"] <= 0:
-        reasons.append("held-out replay expectancy %s a trade is not above zero" % replay_test["expectancy"])
+        reasons.append("no held-out replay signals yet (timemachine.py multiday)")
+    elif (replay_test.get("days") or 0) < min_replay_days:
+        reasons.append("held-out replay has signals on %d days, %d needed" % (replay_test.get("days") or 0,
+                                                                              min_replay_days))
+    elif lo is None or lo <= 0:
+        reasons.append("held-out replay expectancy %s a trade, by-day 95%% range from %s: the low end is not "
+                       "above zero" % (replay_test["expectancy"], lo))
     if not paper or paper["n"] < min_paper_trades:
         reasons.append("%d paper trades, %d needed" % (paper["n"] if paper else 0, min_paper_trades))
     elif paper["expectancy"] is None or paper["expectancy"] <= 0:

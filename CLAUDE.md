@@ -183,6 +183,26 @@ The skills are installed as directory junctions under .claude/skills
        client id, mpin, totp; one live token, 1 a minute) from
        INDSTOCKS_CLIENT_ID, INDSTOCKS_MPIN, INDSTOCKS_TOTP_SECRET in .env;
        the token stays in memory, never on disk.
+13. Stop tuning, test two things on new days (decided 2026-11-17, after 72
+    whole-universe days, Aug 3 to Nov 16):
+    a. One rule: multiday and universe read the paper config
+       (rule_from_config). The paper config logs the 15 % cost check
+       (warn_charges_pct_of_risk) instead of blocking (max_charges_pct_of_risk
+       null): the blocking cap stopped about 86 % of the rule's signals.
+    b. Slippage scales with turnover (slippage_model "turnover": 0.05 % at
+       Rs 50 crore a day and up, x sqrt(50 crore / turnover) below, cap 0.5 %).
+    c. Every-signal 95 % ranges by day (one total per day); the replay half of
+       the go/no-go needs 10+ signal days and the low end above zero.
+    d. multiday chooses on the train days and seals every other test half
+       (--unseal to look, with a warning).
+    e. The long ORB is not tuned further. Two tests are registered in
+       trader-timemachine/registered.json (short at or under 30 % breadth on
+       INDstocks' intraday-allowed stocks; rel. volume top 20, gate off) and
+       scored only on sessions from 2026-11-17 (`timemachine.py registered`,
+       run every evening). Verdict after 20 sessions with 10 signal days;
+       never edit the registration to rescue a test.
+    f. If both fail: point the replay at multi-day holds (wider stops, so the
+       charges are a smaller share of the risk).
 
 ## Rules
 
