@@ -10,6 +10,7 @@ steps by calling the other skills' scripts, and stops at every step that needs a
     python3 day.py watch                       # while a trade is open: alerts, then the paper ledger's tick
     python3 day.py evening --note "..."        # after 15:30: save the day's bars, replay the universe, journal
     python3 day.py --dry-run morning           # print the commands instead of running them
+    python3 day.py schedule install            # weekdays 08:45 morning, 10:01 gate, 15:40 evening (Windows)
 
 It never picks a chart, never sets a stop, never says yes: those are /trader-entry, /trader-exit,
 /trader-timemachine, /trader-budget, /trader-risk and /trader-broker with the user. It never places
@@ -53,6 +54,13 @@ PHASES = [  # (from, to, name)
 
 class DayError(Exception):
     pass
+
+
+LOG = None          # the open log file of an unattended run (--log), which the steps write into too
+
+# The unattended day: Windows Task Scheduler runs these on weekdays; day.py itself skips NSE holidays.
+SCHEDULE = [("morning", "08:45"), ("gate", "10:01"), ("evening", "15:40")]
+TASK_PREFIX = "day-trader-india"
 
 
 def now_ist(text=None):
@@ -231,20 +239,34 @@ def run_step(label, args, dry_run, ok_codes=(0, 1)):
     print("== %s\n$ %s" % (label, " ".join(os.path.basename(a) if a.endswith(".py") else a for a in args)))
     if dry_run:
         return 0
-    p = subprocess.run(cmd)
+    sys.stdout.flush()
+    p = subprocess.run(cmd, stdout=LOG, stderr=LOG) if LOG else subprocess.run(cmd)
     if p.returncode not in ok_codes:
         raise DayError("%s failed (exit %d); stop and read the message above" % (label, p.returncode))
     return p.returncode
 
 
 def token_check():
-    """(ok, message): one INDstocks call. The token expired overnight on 2026-11-06 although it had been good at
-    20:46 the evening before, so the expiry is tied to the day, not to the 24 hours after generation."""
+    """(ok, message): one INDstocks call. A rejected token is replaced once from the TOTP credentials when .env
+    has them (trader_data.generate_token); the new token lives in this process's environment, so every step this
+    run starts inherits it, and it is never written down."""
+    had = os.environ.get(trader_data.TOKEN_VAR)
     try:
         me = trader_data.INDstocks().whoami()
-        return True, "token good (user %s)" % me.get("user_id", "?")
+        fresh = os.environ.get(trader_data.TOKEN_VAR) != had
+        return True, "token %s (user %s)" % ("refreshed from the TOTP credentials" if fresh else "good",
+                                             me.get("user_id", "?"))
     except trader_data.DataError as e:
         return False, "token: %s" % str(e).splitlines()[0]
+
+
+def require_token(step):
+    ok, msg = token_check()
+    if not ok:
+        raise DayError("%s. Regenerate it at indstocks.com (API trading, access tokens) and put it on the "
+                       "INDSTOCKS_TOKEN line of .env, or set %s there for the automatic one, then run day.py %s "
+                       "again." % (msg, ", ".join(trader_data.TOTP_VARS), step))
+    print("== %s" % msg)
 
 
 def cmd_status(a, now, cfg):
@@ -268,11 +290,7 @@ def cmd_status(a, now, cfg):
 
 def cmd_morning(a, now, cfg):
     if not a.dry_run:
-        ok, msg = token_check()
-        if not ok:
-            raise DayError("%s. Regenerate it at indstocks.com (API trading, access tokens), put it on the "
-                           "INDSTOCKS_TOKEN line of .env, then run day.py morning again." % msg)
-        print("== %s" % msg)
+        require_token("morning")
     stamp = ["--now", now.strftime("%Y-%m-%d %H:%M")] if a.now else []
     if not os.path.exists(FILES["universe"]) or a.universe:
         run_step("the universe (INDstocks master minus ASM/GSM)", [script("scanner"), "universe"], a.dry_run)
@@ -287,6 +305,8 @@ def cmd_morning(a, now, cfg):
 def cmd_gate(a, now, cfg):
     stamp = ["--now", now.strftime("%Y-%m-%d %H:%M")] if a.now else []
     off = ["--offline", a.offline] if a.offline else []
+    if not a.dry_run and not a.offline and not a.now:
+        require_token("gate")
     code = run_step("breadth", [script("scanner"), "breadth"] + stamp + off, a.dry_run)
     if a.dry_run:
         run_step("the opening-range scan", [script("scanner"), "orb", "--show", str(a.show)] + stamp + off, True)
@@ -312,6 +332,8 @@ def cmd_watch(a, now, cfg):
 
 def cmd_evening(a, now, cfg):
     today = now.date().isoformat()
+    if not a.dry_run and not a.now:
+        require_token("evening")
     os.makedirs(FILES["replays"], exist_ok=True)
     bundle = "%s/orb5m-%s.json.gz" % (FILES["replays"], today)
     if not os.path.exists(bundle) or a.refetch:
@@ -335,12 +357,53 @@ def cmd_evening(a, now, cfg):
     return 0
 
 
+def schedule_tasks(python, root):
+    """[(task name, HH:MM, command line)] for Windows Task Scheduler: weekdays, from the project folder, logged."""
+    out = []
+    for step, at in SCHEDULE:
+        cmd = '"%s" "%s" %s --root --log "%s"' % (python, os.path.join(root, "trader-day", "day.py"), step,
+                                                   os.path.join(root, "trader", "logs"))
+        out.append(("%s %s" % (TASK_PREFIX, step), at, cmd))
+    return out
+
+
+def cmd_schedule(a, now, cfg):
+    tasks = schedule_tasks(a.python or sys.executable, ROOT)
+    if a.action == "show" or os.name != "nt":
+        for name, at, cmd in tasks:
+            print("%s  weekdays %s  %s" % (name, at, cmd))
+        if os.name != "nt":
+            print("Not Windows: put these in crontab -e instead, e.g. 45 8 * * 1-5 cd %s && python3 "
+                  "trader-day/day.py morning --log trader/logs" % ROOT)
+        return 0
+    for name, at, cmd in tasks:
+        if a.action == "install":
+            argv = ["schtasks", "/Create", "/TN", name, "/TR", cmd, "/SC", "WEEKLY", "/D", "MON,TUE,WED,THU,FRI",
+                    "/ST", at, "/F"]
+        else:
+            argv = ["schtasks", "/Delete", "/TN", name, "/F"]
+        if a.dry_run:
+            print("$ " + " ".join(argv))
+            continue
+        p = subprocess.run(argv, capture_output=True, text=True)
+        print("%s %s: %s" % (a.action, name, (p.stdout or p.stderr).strip().splitlines()[-1] if (p.stdout or p.stderr) else p.returncode))
+        if p.returncode != 0:
+            return 1
+    if a.action == "install":
+        print("Installed. They run while you are signed in and the computer is awake; each skips weekends and NSE "
+              "holidays itself and logs to trader/logs/DATE.log. Entries still wait for you: the gate step stops "
+              "at the breakouts. Remove with: day.py schedule remove")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="The Day: the conductor for the trader skills (trader-day, NSE).")
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--now", help='pretend it is this IST time, "YYYY-MM-DD HH:MM"')
     common.add_argument("--config", default=FILES["config"])
     common.add_argument("--dry-run", action="store_true", help="print the commands a step would run")
+    common.add_argument("--root", action="store_true", help="work from the project folder (for scheduled runs)")
+    common.add_argument("--log", metavar="DIR", help="append everything to DIR/DATE.log (for scheduled runs)")
     sub = ap.add_subparsers(dest="cmd")
     p = sub.add_parser("status", parents=[common], help="where the day stands and the next step")
     p.add_argument("--json", action="store_true")
@@ -357,18 +420,40 @@ def main(argv=None):
     p = sub.add_parser("evening", parents=[common], help="save the bars, replay the universe, write the journal")
     p.add_argument("--note", action="append", help="a journal note (repeatable)")
     p.add_argument("--refetch", action="store_true", help="fetch the bars again even if saved")
+    p = sub.add_parser("schedule", parents=[common], help="the unattended weekday runs in Windows Task Scheduler")
+    p.add_argument("action", choices=["show", "install", "remove"])
+    p.add_argument("--python", help="the Python to run (default: this one)")
     a = ap.parse_args(argv)
     if not a.cmd:
         ap.print_help()
         return 2
+    global LOG
+    if a.root:
+        os.chdir(ROOT)
+    if a.log:
+        os.makedirs(a.log, exist_ok=True)
+        LOG = open(os.path.join(a.log, "%s.log" % now_ist(a.now).date().isoformat()), "a", encoding="utf-8")
+        sys.stdout = sys.stderr = LOG
+        print("\n######## day.py %s at %s IST" % (a.cmd, now_ist().strftime("%Y-%m-%d %H:%M:%S")))
     try:
         now = now_ist(a.now)
         cfg = read_json(a.config) or {}
+        if a.cmd in ("morning", "gate", "watch", "evening"):
+            open_day, why = trader_data.trading_day(now.date())
+            if not open_day:
+                print("No session today (%s): nothing to run." % why)
+                return 0
         return {"status": cmd_status, "morning": cmd_morning, "gate": cmd_gate, "watch": cmd_watch,
-                "evening": cmd_evening}[a.cmd](a, now, cfg)
+                "evening": cmd_evening, "schedule": cmd_schedule}[a.cmd](a, now, cfg)
     except DayError as e:
         print("day.py: %s" % e, file=sys.stderr)
         return 2
+    finally:
+        if LOG:
+            sys.stdout.flush()
+            LOG.close()
+            LOG = None
+            sys.stdout, sys.stderr = sys.__stdout__, sys.__stderr__
 
 
 if __name__ == "__main__":

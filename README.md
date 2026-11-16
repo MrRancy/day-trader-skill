@@ -214,6 +214,12 @@ slippage a side and stops filled at the open when a bar gaps through them.
 The review reports net R a trade, expectancy with a 95 % range, profit
 factor, max drawdown and weekly net.
 
+The routine runs itself on weekdays once `python3 trader-day/day.py schedule
+install` has set up the morning, gate and evening tasks (Windows Task
+Scheduler, logs in `trader/logs/`), and the token renews itself when
+`.env` has `INDSTOCKS_CLIENT_ID`, `INDSTOCKS_MPIN` and
+`INDSTOCKS_TOTP_SECRET`. Entries still wait for a person.
+
 **Go/no-go, decided 2026-11-16.** No real money until both hold: net
 expectancy above zero on the held-out replay days, and net expectancy above
 zero over at least 200 paper trades. `check.py review` prints the verdict.

@@ -626,14 +626,78 @@ def read_dotenv(path):
 
 
 def token(var=TOKEN_VAR, dotenv=None):
-    """The access token from the environment, else from .env next to this module. Never print it."""
+    """The access token from the environment, else from .env next to this module, else (when the TOTP
+    credentials are set) a fresh one from POST /generate/token. Never print it, never write it."""
     t = os.environ.get(var, "").strip()
     if not t:
         t = read_dotenv(dotenv or os.path.join(ROOT, ".env")).get(var, "").strip()
+    if not t and totp_credentials(dotenv):
+        t = generate_token(totp_credentials(dotenv))
     if not t:
         raise DataError("%s is not set: generate a token at indstocks.com/app/api-trading/access-tokens "
-                        "and export it (it lasts 24 hours)" % var)
+                        "and export it (it lasts up to 24 hours), or set %s for the automatic one"
+                        % (var, ", ".join(TOTP_VARS)))
     return t
+
+
+# The automatic token (INDstocks "Method 2", api-docs.indstocks.com/Users/): POST /generate/token with the
+# client id as x-api-key and the account MPIN plus a current TOTP code in the body. The TOTP secret is set up
+# once on the website. Each call invalidates the token before it; one call a minute. The three values live in
+# the environment or .env; the token they buy stays in this process's memory (os.environ, so the scripts it
+# starts inherit it) and is never written anywhere.
+TOTP_VARS = ("INDSTOCKS_CLIENT_ID", "INDSTOCKS_MPIN", "INDSTOCKS_TOTP_SECRET")
+
+
+def totp(secret, at=None, step=30, digits=6):
+    """RFC 6238 time-based one-time password (HMAC-SHA1) from a base32 secret, as an authenticator app shows."""
+    import base64
+    import hashlib
+    import hmac
+    import struct
+    key = str(secret).replace(" ", "").upper()
+    key = base64.b32decode(key + "=" * (-len(key) % 8))
+    counter = int((time.time() if at is None else at) // step)
+    mac = hmac.new(key, struct.pack(">Q", counter), hashlib.sha1).digest()
+    o = mac[-1] & 0x0F
+    code = (struct.unpack(">I", mac[o:o + 4])[0] & 0x7FFFFFFF) % (10 ** digits)
+    return str(code).zfill(digits)
+
+
+def totp_credentials(dotenv=None, in_tests=False):
+    """{var: value} for the three TOTP variables from the environment or .env, or None unless all three are set.
+    Off under the test runner (unittest loaded), so an offline test can never send the MPIN anywhere."""
+    if "unittest" in sys.modules and not in_tests:
+        return None
+    env = read_dotenv(dotenv or os.path.join(ROOT, ".env"))
+    vals = dict((v, (os.environ.get(v) or env.get(v) or "").strip()) for v in TOTP_VARS)
+    return vals if all(vals.values()) else None
+
+
+def generate_token(creds, opener=None, at=None):
+    """A new access token from POST /generate/token. Sets it in os.environ for this process and its children;
+    returns it. Never prints or stores it, and no error message carries the MPIN, the secret or the token."""
+    body = json.dumps({"mpin": creds["INDSTOCKS_MPIN"], "totp": totp(creds["INDSTOCKS_TOTP_SECRET"], at)}).encode("utf-8")
+    req = urllib.request.Request(INDstocks.BASE + "/generate/token", data=body, method="POST",
+                                 headers={"x-api-key": creds["INDSTOCKS_CLIENT_ID"], "Content-Type": "application/json",
+                                          "Accept": "application/json", "User-Agent": UA})
+    try:
+        with (opener or OPENER).open(req, timeout=30) as r:
+            doc = json.loads(r.read().decode("utf-8", "replace") or "{}")
+    except urllib.error.HTTPError as e:
+        try:
+            msg = json.loads(e.read().decode("utf-8", "replace") or "{}").get("message")
+        except Exception:
+            msg = None
+        raise DataError("INDstocks /generate/token answered HTTP %d%s. Check the client id, the MPIN and the TOTP "
+                        "secret in .env (5 wrong codes lock it for 15 minutes; one token a minute)"
+                        % (e.code, (": %s" % msg) if msg else ""))
+    except (urllib.error.URLError, socket.timeout, ValueError) as e:
+        raise DataError("INDstocks /generate/token failed: %s" % e)
+    tok = doc.get("token") or (doc.get("data") or {}).get("token") if isinstance(doc, dict) else None
+    if not tok:
+        raise DataError("INDstocks /generate/token answered without a token")
+    os.environ[TOKEN_VAR] = tok
+    return tok
 
 
 # ---------------------------------------------------------------- INDstocks
@@ -649,6 +713,7 @@ class INDstocks(object):
         self._master = {}        # source -> rows
         self._codes = {}         # (EXCH, SYMBOL) -> scrip code, from the equity master
         self._last_request = 0.0
+        self._refreshed = False
 
     # -- transport
 
@@ -685,9 +750,17 @@ class INDstocks(object):
                     last = "HTTP 403 (a throttle after a burst, or the token)"
                     SLEEP(THROTTLE_BACKOFF * (attempt + 1))
                     continue
+                if e.code in (401, 403) and not self._refreshed and totp_credentials():
+                    # one automatic refresh a process, when the TOTP credentials are set
+                    self._refreshed = True
+                    self._token = generate_token(totp_credentials())
+                    req = urllib.request.Request(url, headers={"Authorization": self._token, "User-Agent": UA,
+                                                               "Accept": "*/*"})
+                    last = "HTTP %d, token refreshed" % e.code
+                    continue
                 if e.code in (401, 403):
                     raise DataError("INDstocks answered HTTP %d for %s: the token is invalid or has expired "
-                                    "(it dies with the day, not 24 hours after generation)%s. Generate a new one "
+                                    "(it lasts up to 24 hours)%s. Generate a new one "
                                     "and set %s." % (e.code, path,
                                                      ", or a burst of requests tripped its rate limit" if e.code == 403 else "",
                                                      TOKEN_VAR))

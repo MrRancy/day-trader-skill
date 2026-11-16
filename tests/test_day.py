@@ -182,6 +182,29 @@ class TheCli(Scratch):
         self.assertIn("--now wants", err)
         self.assertEqual(run([])[0], 2)
 
+    def test_the_unattended_day(self):
+        tasks = day.schedule_tasks(r"C:\py\python.exe", r"C:\proj")
+        self.assertEqual([(n, t) for n, t, _ in tasks], [("day-trader-india morning", "08:45"),
+                                                         ("day-trader-india gate", "10:01"),
+                                                         ("day-trader-india evening", "15:40")])
+        self.assertTrue(all(c.startswith(r'"C:\py\python.exe" "') and "--root --log" in c for _, _, c in tasks))
+        code, out, _ = run(["schedule", "install", "--dry-run", "--python", "py"])
+        self.assertEqual(code, 0)
+        if os.name == "nt":
+            self.assertIn("schtasks /Create /TN day-trader-india morning", out)
+        # a holiday or a weekend: the scheduled steps say so and do nothing
+        code, out, _ = run(["morning", "--now", "2026-11-10 08:45"])
+        self.assertEqual((code, out.strip()), (0, "No session today (NSE holiday: Diwali-Balipratipada): nothing to run."))
+        code, out, _ = run(["evening", "--now", "2026-11-14 15:40"])
+        self.assertIn("No session today (weekend)", out)
+        # --log writes the run into DIR/DATE.log instead of the screen
+        import tempfile
+        d = tempfile.mkdtemp()
+        code, out, _ = run(["gate", "--now", "2026-11-14 10:01", "--log", d])
+        self.assertEqual(out, "")
+        with open(os.path.join(d, "2026-11-14.log")) as fh:
+            self.assertIn("No session today (weekend)", fh.read())
+
     def test_scripts_exist(self):
         for name in day.SCRIPTS:
             self.assertTrue(os.path.exists(day.script(name)), name)

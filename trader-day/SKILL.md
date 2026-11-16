@@ -55,6 +55,23 @@ watchlist, the entry, the plan, the Time Machine, the orders, the risk
 verdicts, the paper ledger's positions and today's closed trades, the
 saved bars, the replay and the journal, and names exactly one next step.
 
+## The unattended day
+
+```bash
+python3 "${CLAUDE_SKILL_DIR}/day.py" schedule show       # the three tasks it would create
+python3 "${CLAUDE_SKILL_DIR}/day.py" schedule install    # Windows Task Scheduler, weekdays
+python3 "${CLAUDE_SKILL_DIR}/day.py" schedule remove
+```
+
+Three weekday tasks run `day.py morning` at 08:45, `day.py gate` at 10:01 and
+`day.py evening` at 15:40, from the project folder (`--root`), each appending
+to `trader/logs/DATE.log` (`--log`). Each step skips weekends and NSE
+holidays itself and checks the token first; with the TOTP lines in `.env` a
+dead token is replaced in memory (trader-broker, "The automatic token"). The
+gate step stops at the breakouts: picking a chart, the stop and the yes still
+wait for the user, so nothing is placed by a schedule. The tasks run while
+the user is signed in and the computer is awake.
+
 ## The rules
 
 - **One step at a time.** `status` names one next command. Run it, read it,

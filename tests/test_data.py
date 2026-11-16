@@ -283,6 +283,74 @@ class Token(unittest.TestCase):
         self.assertEqual(td.read_dotenv(os.path.join(d, "gone")), {})
 
 
+class AutoToken(unittest.TestCase):
+    """The automatic token: RFC 6238 codes and the shape of POST /generate/token, on a fake connection."""
+
+    def test_totp_matches_the_rfc_6238_vectors(self):
+        import base64
+        secret = base64.b32encode(b"12345678901234567890").decode()          # the RFC's SHA-1 test key
+        self.assertEqual([td.totp(secret, at, digits=8) for at in (59, 1111111109, 1234567890, 2000000000)],
+                         ["94287082", "07081804", "89005924", "69279037"])
+        self.assertEqual(td.totp(secret.lower(), 59), "287082")                # 6 digits, case-insensitive
+
+    def test_credentials_need_all_three_and_stay_off_in_tests(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = os.path.join(d, ".env")
+            with open(p, "w") as fh:
+                fh.write("INDSTOCKS_CLIENT_ID=cid\nINDSTOCKS_MPIN=1234\nINDSTOCKS_TOTP_SECRET=GEZDGNBVGY3TQOJQ\n")
+            self.assertIsNone(td.totp_credentials(p))                          # unittest is loaded: off
+            self.assertEqual(sorted(td.totp_credentials(p, in_tests=True)), sorted(td.TOTP_VARS))
+            with open(p, "w") as fh:
+                fh.write("INDSTOCKS_CLIENT_ID=cid\nINDSTOCKS_MPIN=1234\n")
+            self.assertIsNone(td.totp_credentials(p, in_tests=True))
+
+    def test_generate_token_request_and_answer(self):
+        seen = {}
+
+        class Resp(object):
+            def __init__(self, body):
+                self.body = body
+
+            def read(self):
+                return self.body
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        class Opener(object):
+            def __init__(self, body=None, code=None):
+                self.body, self.code = body, code
+
+            def open(self, req, timeout=None):
+                seen.update(url=req.full_url, method=req.get_method(), key=req.get_header("X-api-key"),
+                            body=json.loads(req.data.decode()))
+                if self.code:
+                    raise urllib.error.HTTPError(req.full_url, self.code, "x", {}, io.BytesIO(b'{"message": "bad totp"}'))
+                return Resp(self.body)
+        creds = {"INDSTOCKS_CLIENT_ID": "cid", "INDSTOCKS_MPIN": "1234", "INDSTOCKS_TOTP_SECRET": "GEZDGNBVGY3TQOJQ"}
+        old = os.environ.pop("INDSTOCKS_TOKEN", None)
+        try:
+            tok = td.generate_token(creds, Opener(b'{"token": "new.token"}'), at=59)
+            self.assertEqual(tok, "new.token")
+            self.assertEqual(os.environ["INDSTOCKS_TOKEN"], "new.token")      # in memory, for the children
+            self.assertEqual((seen["url"], seen["method"], seen["key"]),
+                             ("https://api.indstocks.com/generate/token", "POST", "cid"))
+            self.assertEqual(seen["body"], {"mpin": "1234", "totp": td.totp("GEZDGNBVGY3TQOJQ", 59)})
+            with self.assertRaises(td.DataError) as cm:
+                td.generate_token(creds, Opener(code=401), at=59)
+            self.assertIn("HTTP 401: bad totp", str(cm.exception))
+            self.assertNotIn("1234", str(cm.exception))                       # never the MPIN
+            with self.assertRaises(td.DataError):
+                td.generate_token(creds, Opener(b'{"status": "ok"}'), at=59)
+        finally:
+            os.environ.pop("INDSTOCKS_TOKEN", None)
+            if old is not None:
+                os.environ["INDSTOCKS_TOKEN"] = old
+
+
 class Transport(unittest.TestCase):
     def setUp(self):
         self.slept = []

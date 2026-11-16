@@ -75,6 +75,17 @@ its own ledger until the user turns `"paper"` off.
    to `trader_data.py`. **Tokens never go in the chat.** Never ask for one,
    never read `.env` back into the conversation, and if the user pastes a
    token anyway, tell them to delete that message and generate a new one.
+
+   **The automatic token.** INDstocks also issues tokens from a TOTP code
+   (POST /generate/token with the client id, the account MPIN and the
+   current 6-digit code). The user sets up TOTP once on the access-tokens
+   page and puts three lines in `.env` themselves: `INDSTOCKS_CLIENT_ID`,
+   `INDSTOCKS_MPIN` and `INDSTOCKS_TOTP_SECRET`. When a call is rejected
+   (or no token is set) the tools generate a new one, keep it in memory for
+   that run and the steps it starts, and never write it down. Each new token
+   replaces the one before it, one a minute at most; five wrong codes lock it
+   for 15 minutes. These three values open the account: they stay in `.env`
+   (gitignored), never in the chat, and Claude never reads them back.
 2. Read-only calls (quotes, candles, the order book, positions, funds) work
    from anywhere. **Placing, modifying or cancelling an order needs the
    account's static IP whitelisted** on that same page (NSE circular
