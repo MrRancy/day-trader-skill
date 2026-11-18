@@ -191,6 +191,23 @@ class TheCli(Scratch):
         self.assertIn("--now wants", err)
         self.assertEqual(run([])[0], 2)
 
+    def test_a_failed_breadth_is_not_a_closed_gate(self):
+        # scan.py breadth exits 1 for a closed gate and for an error; only today's reading means closed
+        real = day.run_step
+        day.run_step = lambda label, args, dry_run, ok_codes=(0, 1): 1
+        try:
+            self.put("breadth", {"date": "2026-11-05", "time": "10:00", "pct": 48.8, "open": False})   # stale
+            code, out, _ = run(["gate", "--now", "2026-11-06 10:01"])
+            self.assertEqual(code, 2)
+            self.assertIn("Breadth failed: no reading for today", out)
+            self.assertNotIn("Gate closed", out)
+            self.put("breadth", {"date": "2026-11-06", "time": "10:01", "pct": 48.8, "open": False})
+            code, out, _ = run(["gate", "--now", "2026-11-06 10:01"])
+            self.assertEqual(code, 1)
+            self.assertIn("Gate closed: a watching day", out)
+        finally:
+            day.run_step = real
+
     def test_the_unattended_day(self):
         tasks = day.schedule_tasks(r"C:\py\python.exe", r"C:\proj")
         self.assertEqual([(n, t) for n, t, _ in tasks], [("day-trader-india morning", "08:45"),

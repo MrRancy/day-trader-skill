@@ -84,6 +84,40 @@ class BreadthGate(unittest.TestCase):
             self.assertIn("too early to decide", out)
             self.assertIn("Re-run at 10:00.", out)
 
+    def test_a_symbol_gone_from_the_master_is_skipped(self):
+        # 2026-11-18: DRAGARWQ, in the Nov 4 universe, left the master and the whole 10:01 sweep died on it
+        class Fake(object):
+            def resolve(self, s):
+                if s == "GONE":
+                    raise scan.trader_data.DataError("GONE is not in the INDstocks NSE equity master")
+                return "NSE_" + s
+
+            def quote(self, syms):
+                assert "GONE" not in syms
+                return dict((s, {"open": 100, "ltp": 101 if s == "A" else 99, "volume": 5}) for s in syms)
+
+        name = (os.environ.get(scan.trader_data.BACKEND_VAR) or "indstocks").lower()
+        old = scan.trader_data._default.get(name)
+        scan.trader_data._default[name] = Fake()
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                out_path = os.path.join(tmp, "breadth.json")
+                code, out, err = run(scan, ["breadth", "--symbols", "A,GONE,B", "--now", "2026-11-03 10:00",
+                                            "--out", out_path, "--config", "/nonexistent"])
+                self.assertEqual(code, 1, err)
+                self.assertIn("Skipping 1 not in the INDstocks master: GONE", err)
+                self.assertIn("1 of 2 charts above their 09:15 open (50.0%)", out)
+                with open(out_path) as fh:
+                    self.assertEqual(json.load(fh)["counted"], 2)
+                code, out, err = run(scan, ["breadth", "--symbols", "GONE", "--now", "2026-11-03 10:00",
+                                            "--out", out_path, "--config", "/nonexistent"])
+                self.assertIn("none of the 1 symbols is in the INDstocks master", err)
+        finally:
+            if old is None:
+                scan.trader_data._default.pop(name, None)
+            else:
+                scan.trader_data._default[name] = old
+
 
 class UniverseReplay(unittest.TestCase):
     def test_the_rule_and_the_baseline_on_174_charts(self):

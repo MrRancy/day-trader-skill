@@ -315,6 +315,11 @@ def cmd_gate(a, now, cfg):
     if a.dry_run:
         run_step("the opening-range scan", [script("scanner"), "orb", "--show", str(a.show)] + stamp + off, True)
         return 0
+    if code != 0 and not today_doc(read_json(FILES["breadth"]), "date", now.date().isoformat()):
+        # breadth exits 1 for a closed gate AND for an error; only a reading written today is a closed gate
+        print("Breadth failed: no reading for today (the error is above), so the gate is unknown, not closed. Fix it "
+              "and run day.py gate again.")
+        return 2
     if code != 0:
         print("Gate closed: a watching day unless breadth lifts before %s. Run day.py gate again later, or "
               "day.py evening after the close." % cfg_value(cfg, "no_entries_after", "11:00"))

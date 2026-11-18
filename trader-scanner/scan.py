@@ -889,11 +889,25 @@ def cmd_breadth(a):
         source = "bundle %s" % os.path.basename(a.offline.rstrip("/"))
     else:
         symbols = read_symbols(a)
+        b = trader_data.backend()
+        known, unknown = [], []
+        for sym in symbols:          # one symbol gone from the master (delisted, renamed) must not sink the sweep
+            try:
+                b.resolve(sym)
+                known.append(sym)
+            except trader_data.DataError:
+                unknown.append(sym)
+        if unknown:
+            progress(a, "Skipping %d not in the INDstocks master: %s%s (rebuild with scan.py universe)"
+                     % (len(unknown), ", ".join(unknown[:5]), " ..." if len(unknown) > 5 else ""))
+        if not known:
+            raise ScanError("none of the %d symbols is in the INDstocks master" % len(symbols))
+        symbols = known
         progress(a, "Quoting %s symbols (%d INDstocks requests)..." % ("{:,}".format(len(symbols)),
                                                                         (len(symbols) + trader_data.QUOTES_PER_CALL - 1)
                                                                         // trader_data.QUOTES_PER_CALL))
         try:
-            quotes = trader_data.backend().quote(symbols)
+            quotes = b.quote(symbols)
         except trader_data.DataError as e:
             raise ScanError(str(e))
         reading = breadth_from_quotes(quotes, a.min_price)
