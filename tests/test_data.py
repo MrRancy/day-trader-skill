@@ -343,6 +343,29 @@ class AutoToken(unittest.TestCase):
                 td.generate_token(creds, Opener(code=401), at=59)
             self.assertIn("HTTP 401: bad totp", str(cm.exception))
             self.assertNotIn("1234", str(cm.exception))                       # never the MPIN
+
+            # 2026-11-20: two caught-up runs asked in the same second; the second is waited out once
+            class Busy(object):
+                def __init__(self, fails):
+                    self.fails, self.calls = fails, 0
+
+                def open(self, req, timeout=None):
+                    self.calls += 1
+                    if self.calls <= self.fails:
+                        raise urllib.error.HTTPError(req.full_url, 400, "x", {}, io.BytesIO(
+                            b'{"message": "A token request is already in progress. Please try again."}'))
+                    return Resp(b'{"token": "later.token"}')
+            slept, real = [], td.SLEEP
+            td.SLEEP = slept.append
+            try:
+                b = Busy(1)
+                self.assertEqual(td.generate_token(creds, b, at=59), "later.token")
+                self.assertEqual((b.calls, slept), (2, [td.TOKEN_BUSY_WAIT]))
+                with self.assertRaises(td.DataError) as cm:
+                    td.generate_token(creds, Busy(2), at=59)
+                self.assertIn("HTTP 400: A token request is already in progress", str(cm.exception))
+            finally:
+                td.SLEEP = real
             with self.assertRaises(td.DataError):
                 td.generate_token(creds, Opener(b'{"status": "ok"}'), at=59)
         finally:

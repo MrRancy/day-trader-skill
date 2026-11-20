@@ -208,6 +208,44 @@ class TheCli(Scratch):
         finally:
             day.run_step = real
 
+    def test_one_run_at_a_time(self):
+        # 2026-11-20: the morning and the gate, caught up together, cancelled each other's tokens
+        now = day.now_ist("2026-11-06 10:01")
+        with open(day.LOCK, "w") as fh:
+            fh.write("pid 1, day.py morning from 13:29:00")
+        real, real_step = day.SLEEP, day.run_step
+        day.SLEEP = lambda s: os.remove(day.LOCK)          # the other run finishes while this one waits
+        try:
+            out = io.StringIO()
+            with redirect_stdout(out):
+                self.assertEqual(day.take_lock("gate", now), day.LOCK)
+            self.assertIn("Waiting for the other run to finish (pid 1, day.py morning from 13:29:00)", out.getvalue())
+            with open(day.LOCK) as fh:
+                self.assertIn("day.py gate", fh.read())
+            os.remove(day.LOCK)
+            # a lock past the 3-hour task limit is a leftover: removed
+            with open(day.LOCK, "w") as fh:
+                fh.write("pid 2, day.py evening")
+            old = os.path.getmtime(day.LOCK) - day.LOCK_STALE - 60
+            os.utime(day.LOCK, (old, old))
+            with redirect_stdout(io.StringIO()) as o:
+                day.take_lock("gate", now)
+            self.assertIn("Removing a stale lock (pid 2, day.py evening", o.getvalue())
+            # a live lock held too long: give up with the file named
+            day.SLEEP = lambda s: None
+            with redirect_stdout(io.StringIO()):
+                with self.assertRaises(day.DayError) as cm:
+                    day.take_lock("evening", now)
+            self.assertIn("delete the file if no day.py is running", str(cm.exception))
+            os.remove(day.LOCK)
+            # a run takes the lock and lets it go, even when it fails
+            day.run_step = lambda *a, **k: 1
+            code, out, _ = run(["gate", "--now", "2026-11-06 10:01"])
+            self.assertEqual(code, 2)
+            self.assertFalse(os.path.exists(day.LOCK))
+        finally:
+            day.SLEEP, day.run_step = real, real_step
+
     def test_the_unattended_day(self):
         tasks = day.schedule_tasks(r"C:\py\python.exe", r"C:\proj")
         self.assertEqual([(n, t) for n, t, _ in tasks], [("day-trader-india morning", "08:45"),

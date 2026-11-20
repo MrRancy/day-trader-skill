@@ -83,7 +83,13 @@ the user is signed in. `install` also sets what `schtasks` cannot: each task
 wakes the computer for its run (when the power plan allows wake timers),
 starts and keeps running on battery, runs a missed start as soon as the
 computer is next available (so a missed evening still saves the day's bars)
-and stops after 3 hours.
+and stops after 3 hours. Runs take turns through `trader/state/day.lock`:
+every new INDstocks token cancels the one before it, so when a shut-down
+computer comes back and Windows starts the missed morning and gate together,
+the second waits for the first (up to 45 minutes; a lock older than 3 hours
+is a leftover and is removed). A token request refused as "already in
+progress" is retried once after 65 seconds. A Windows "Shut down" (fast
+startup) cannot be woken by a timer; Sleep can.
 
 ## The rules
 

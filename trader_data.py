@@ -716,26 +716,38 @@ def totp_credentials(dotenv=None, in_tests=False):
     return vals if all(vals.values()) else None
 
 
+TOKEN_BUSY_WAIT = 65.0   # seconds: INDstocks issues one token a minute and refuses a second request meanwhile
+
+
 def generate_token(creds, opener=None, at=None):
     """A new access token from POST /generate/token. Sets it in os.environ for this process and its children;
-    returns it. Never prints or stores it, and no error message carries the MPIN, the secret or the token."""
-    body = json.dumps({"mpin": creds["INDSTOCKS_MPIN"], "totp": totp(creds["INDSTOCKS_TOTP_SECRET"], at)}).encode("utf-8")
-    req = urllib.request.Request(INDstocks.BASE + "/generate/token", data=body, method="POST",
-                                 headers={"x-api-key": creds["INDSTOCKS_CLIENT_ID"], "Content-Type": "application/json",
-                                          "Accept": "application/json", "User-Agent": UA})
-    try:
-        with (opener or OPENER).open(req, timeout=30) as r:
-            doc = json.loads(r.read().decode("utf-8", "replace") or "{}")
-    except urllib.error.HTTPError as e:
+    returns it. Never prints or stores it, and no error message carries the MPIN, the secret or the token.
+    "A token request is already in progress" (HTTP 400, seen 2026-11-20 when two caught-up scheduled runs started
+    in the same second) is waited out once, with a fresh code."""
+    for attempt in (0, 1):
+        body = json.dumps({"mpin": creds["INDSTOCKS_MPIN"],
+                           "totp": totp(creds["INDSTOCKS_TOTP_SECRET"], at)}).encode("utf-8")
+        req = urllib.request.Request(INDstocks.BASE + "/generate/token", data=body, method="POST",
+                                     headers={"x-api-key": creds["INDSTOCKS_CLIENT_ID"],
+                                              "Content-Type": "application/json",
+                                              "Accept": "application/json", "User-Agent": UA})
         try:
-            msg = json.loads(e.read().decode("utf-8", "replace") or "{}").get("message")
-        except Exception:
-            msg = None
-        raise DataError("INDstocks /generate/token answered HTTP %d%s. Check the client id, the MPIN and the TOTP "
-                        "secret in .env (5 wrong codes lock it for 15 minutes; one token a minute)"
-                        % (e.code, (": %s" % msg) if msg else ""))
-    except (urllib.error.URLError, socket.timeout, ValueError) as e:
-        raise DataError("INDstocks /generate/token failed: %s" % e)
+            with (opener or OPENER).open(req, timeout=30) as r:
+                doc = json.loads(r.read().decode("utf-8", "replace") or "{}")
+            break
+        except urllib.error.HTTPError as e:
+            try:
+                msg = json.loads(e.read().decode("utf-8", "replace") or "{}").get("message")
+            except Exception:
+                msg = None
+            if attempt == 0 and "in progress" in str(msg or "").lower():
+                SLEEP(TOKEN_BUSY_WAIT)
+                continue
+            raise DataError("INDstocks /generate/token answered HTTP %d%s. Check the client id, the MPIN and the "
+                            "TOTP secret in .env (5 wrong codes lock it for 15 minutes; one token a minute)"
+                            % (e.code, (": %s" % msg) if msg else ""))
+        except (urllib.error.URLError, socket.timeout, ValueError) as e:
+            raise DataError("INDstocks /generate/token failed: %s" % e)
     tok = doc.get("token") or (doc.get("data") or {}).get("token") if isinstance(doc, dict) else None
     if not tok:
         raise DataError("INDstocks /generate/token answered without a token")

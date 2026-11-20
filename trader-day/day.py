@@ -23,6 +23,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -57,6 +58,51 @@ class DayError(Exception):
 
 
 LOG = None          # the open log file of an unattended run (--log), which the steps write into too
+
+# One run at a time: every new INDstocks token cancels the one before it, so two runs at once (the morning and the
+# gate caught up together after the computer was off, 2026-11-20) cancel each other's tokens.
+LOCK = "trader/state/day.lock"
+LOCK_WAIT = 45 * 60      # seconds to wait for the other run before giving up
+LOCK_STALE = 3 * 3600    # a lock older than the tasks' 3-hour limit is left over from a killed run
+LOCK_POLL = 10
+SLEEP = time.sleep       # tests swap this out
+
+
+def take_lock(cmd, now):
+    """Create the lock file, waiting for another day.py run that holds it. Returns its path."""
+    d = os.path.dirname(LOCK)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    waited, told = 0, False
+    while True:
+        try:
+            fd = os.open(LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, ("pid %d, day.py %s from %s" % (os.getpid(), cmd, now.strftime("%H:%M:%S"))).encode("utf-8"))
+            os.close(fd)
+            return LOCK
+        except FileExistsError:
+            try:
+                age = time.time() - os.path.getmtime(LOCK)
+                with open(LOCK, encoding="utf-8") as fh:
+                    holder = fh.read().strip() or "?"
+            except OSError:
+                continue                         # released between the two calls: try again
+            if age > LOCK_STALE:
+                print("Removing a stale lock (%s, %d minutes old)." % (holder, age // 60))
+                try:
+                    os.remove(LOCK)
+                except OSError:
+                    pass
+                continue
+            if waited >= LOCK_WAIT:
+                raise DayError("another run (%s) has held %s for %d minutes; delete the file if no day.py is "
+                               "running" % (holder, LOCK, age // 60))
+            if not told:
+                print("Waiting for the other run to finish (%s)." % holder)
+                sys.stdout.flush()
+                told = True
+            SLEEP(LOCK_POLL)
+            waited += LOCK_POLL
 
 # The unattended day: Windows Task Scheduler runs these on weekdays; day.py itself skips NSE holidays.
 SCHEDULE = [("morning", "08:45"), ("gate", "10:01"), ("evening", "15:40")]
@@ -469,6 +515,7 @@ def main(argv=None):
         LOG = open(os.path.join(a.log, "%s.log" % now_ist(a.now).date().isoformat()), "a", encoding="utf-8")
         sys.stdout = sys.stderr = LOG
         print("\n######## day.py %s at %s IST" % (a.cmd, now_ist().strftime("%Y-%m-%d %H:%M:%S")))
+    lock = None
     try:
         now = now_ist(a.now)
         cfg = read_json(a.config) or {}
@@ -477,12 +524,19 @@ def main(argv=None):
             if not open_day:
                 print("No session today (%s): nothing to run." % why)
                 return 0
+            if not a.dry_run:
+                lock = take_lock(a.cmd, now_ist())
         return {"status": cmd_status, "morning": cmd_morning, "gate": cmd_gate, "watch": cmd_watch,
                 "evening": cmd_evening, "schedule": cmd_schedule}[a.cmd](a, now, cfg)
     except DayError as e:
         print("day.py: %s" % e, file=sys.stderr)
         return 2
     finally:
+        if lock:
+            try:
+                os.remove(lock)
+            except OSError:
+                pass
         if LOG:
             sys.stdout.flush()
             LOG.close()
